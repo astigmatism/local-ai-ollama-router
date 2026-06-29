@@ -22,6 +22,8 @@ OLLAMA_BASE_URL: "http://192.168.1.21:11435"
 
 After changing environment variables, verify OpenWebUI did not keep a database-stored Ollama URL by checking router request history while sending a chat.
 
+For Open WebUI workflow/custom model compatibility, prefer protecting behavior at the router rather than modifying Open WebUI source. Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` for the router when Open WebUI should be allowed to send any configured base-model name while the router forwards the request to the deployed active Ollama model. The router preserves non-model request parameters such as `options`, `think`, `format`, messages, and streaming settings, and still normalizes `keep_alive` to the configured forced value.
+
 ## ComfyUI
 
 Search for hardcoded raw URLs:

@@ -65,10 +65,12 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
         code: 'MODEL_MANAGEMENT_DISABLED',
         message: 'Model-management endpoints are disabled by router policy.',
         requestedModel,
+        forwardedModel: requestedModel,
         activeModel,
         incomingKeepAlive,
         forwardedKeepAlive: undefined,
-        sanitizedBody: body
+        sanitizedBody: body,
+        modelRewritten: false
       };
     }
     if (!isAdmin) {
@@ -78,33 +80,52 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
         code: 'ADMIN_REQUIRED',
         message: 'This model-management endpoint requires router admin authorization.',
         requestedModel,
+        forwardedModel: requestedModel,
         activeModel,
         incomingKeepAlive,
         forwardedKeepAlive: undefined,
-        sanitizedBody: body
+        sanitizedBody: body,
+        modelRewritten: false
       };
     }
     return {
       allowed: true,
       requestedModel,
+      forwardedModel: requestedModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: incomingKeepAlive,
       sanitizedBody: body,
       keepAliveNormalized: false,
+      modelRewritten: false,
       adminModelManagement: true
     };
   }
 
   if (SAFE_PROXY_ROUTES.has(key)) {
+    let sanitizedBody = body;
+    let forwardedModel = requestedModel;
+    let modelRewritten = false;
+
+    if (key === 'POST /api/show' && body && typeof body === 'object' && !Array.isArray(body) && activeModel && config.rewriteRequestedModelToActive) {
+      sanitizedBody = cloneJson(body);
+      if (requestedModel !== activeModel) {
+        sanitizedBody.model = activeModel;
+        forwardedModel = activeModel;
+        modelRewritten = true;
+      }
+    }
+
     return {
       allowed: true,
       requestedModel,
+      forwardedModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: incomingKeepAlive,
-      sanitizedBody: body,
-      keepAliveNormalized: false
+      sanitizedBody,
+      keepAliveNormalized: false,
+      modelRewritten
     };
   }
 
@@ -115,10 +136,12 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       code: 'ROUTE_NOT_SUPPORTED',
       message: 'This route is not enabled in the Ollama router.',
       requestedModel,
+      forwardedModel: requestedModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: undefined,
-      sanitizedBody: body
+      sanitizedBody: body,
+      modelRewritten: false
     };
   }
 
@@ -129,18 +152,31 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       code: 'INVALID_JSON_BODY',
       message: 'Expected a JSON object body.',
       requestedModel,
+      forwardedModel: requestedModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: undefined,
-      sanitizedBody: body
+      sanitizedBody: body,
+      modelRewritten: false
     };
   }
 
   let effectiveModel = requestedModel;
+  let forwardedModel = requestedModel;
+  let modelRewritten = false;
   const sanitizedBody = cloneJson(body);
-  if (!effectiveModel && config.useActiveModelWhenMissing && activeModel) {
+
+  if (activeModel && config.rewriteRequestedModelToActive) {
+    if (effectiveModel !== activeModel) {
+      sanitizedBody.model = activeModel;
+      effectiveModel = activeModel;
+      forwardedModel = activeModel;
+      modelRewritten = true;
+    }
+  } else if (!effectiveModel && config.useActiveModelWhenMissing && activeModel) {
     sanitizedBody.model = activeModel;
     effectiveModel = activeModel;
+    forwardedModel = activeModel;
   }
 
   if (!activeModel && config.modelPolicyMode !== 'permissive') {
@@ -149,11 +185,13 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       status: 503,
       code: 'NO_ACTIVE_MODEL',
       message: 'No active model marker is available. The router fails closed by default.',
-      requestedModel: effectiveModel,
+      requestedModel,
+      forwardedModel: effectiveModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: undefined,
-      sanitizedBody
+      sanitizedBody,
+      modelRewritten
     };
   }
 
@@ -163,11 +201,13 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       status: 400,
       code: 'MODEL_REQUIRED',
       message: 'Ollama-compatible generation endpoints require a model.',
-      requestedModel: effectiveModel,
+      requestedModel,
+      forwardedModel: effectiveModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: undefined,
-      sanitizedBody
+      sanitizedBody,
+      modelRewritten
     };
   }
 
@@ -177,11 +217,13 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       status: 409,
       code: 'MODEL_NOT_ACTIVE',
       message: 'Requested model is not the active deployed model for this router profile.',
-      requestedModel: effectiveModel,
+      requestedModel,
+      forwardedModel: effectiveModel,
       activeModel,
       incomingKeepAlive,
       forwardedKeepAlive: undefined,
-      sanitizedBody
+      sanitizedBody,
+      modelRewritten
     };
   }
 
@@ -195,12 +237,14 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
 
   return {
     allowed: true,
-    requestedModel: effectiveModel,
+    requestedModel,
+    forwardedModel: effectiveModel,
     activeModel,
     incomingKeepAlive,
     forwardedKeepAlive,
     sanitizedBody,
     keepAliveNormalized,
+    modelRewritten,
     activeModelRequest: effectiveModel === activeModel
   };
 }

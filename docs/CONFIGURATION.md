@@ -43,6 +43,7 @@ Marker format:
 |---|---:|---|
 | `MODEL_POLICY_MODE` | `active-only` | `active-only`, `allowlist`, or `permissive`. |
 | `ALLOWED_MODELS` | empty | CSV of additional models for `allowlist` mode or exceptions. |
+| `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, rewrite model-bearing requests to the active model while preserving all other request fields. Intended for trusted compatibility clients such as Open WebUI workflows. |
 | `FORCE_KEEP_ALIVE` | `-1` | Forwarded keep-alive for active protected requests. |
 | `PROTECTED_MODEL_ENDPOINTS` | `/api/chat,/api/generate,/api/embed,/api/embeddings` | Endpoints receiving keep-alive rewrite. |
 | `USE_ACTIVE_MODEL_WHEN_MISSING` | `false` | When true, missing model is filled with active model. Default false for compatibility/fail-closed clarity. |

@@ -279,7 +279,9 @@ async function rejectProxyRequest(response, context, record, status, code, messa
     endpoint: record.endpoint,
     method: record.method,
     requestedModel: extra.requestedModel,
+    forwardedModel: extra.forwardedModel,
     activeModel: extra.activeModel,
+    modelRewritten: Boolean(extra.modelRewritten),
     clientIdentity: record.clientIdentity,
     sourceIp: record.sourceIp
   });
@@ -330,6 +332,8 @@ async function handleProxy(request, response, url, context) {
     ...recordBase,
     activeModel: policy.activeModel,
     requestedModel: policy.requestedModel,
+    forwardedModel: policy.forwardedModel,
+    modelRewritten: Boolean(policy.modelRewritten),
     incomingKeepAlive: policy.incomingKeepAlive,
     forwardedKeepAlive: policy.forwardedKeepAlive,
     keepAliveNormalized: Boolean(policy.keepAliveNormalized),
@@ -341,10 +345,25 @@ async function handleProxy(request, response, url, context) {
     await rejectProxyRequest(response, context, commonRecord, policy.status || 403, policy.code, policy.message, {
       activeModel: policy.activeModel,
       requestedModel: policy.requestedModel,
+      forwardedModel: policy.forwardedModel,
+      modelRewritten: Boolean(policy.modelRewritten),
       incomingKeepAlive: policy.incomingKeepAlive,
       forwardedKeepAlive: policy.forwardedKeepAlive
     });
     return;
+  }
+
+  if (policy.modelRewritten) {
+    await persistEvent(context.store, {
+      type: 'model_rewritten_to_active',
+      endpoint: pathname,
+      method: request.method,
+      requestedModel: policy.requestedModel,
+      forwardedModel: policy.forwardedModel,
+      activeModel: policy.activeModel,
+      clientIdentity: commonRecord.clientIdentity,
+      sourceIp: commonRecord.sourceIp
+    });
   }
 
   if (policy.keepAliveNormalized) {
@@ -352,7 +371,9 @@ async function handleProxy(request, response, url, context) {
       type: 'keep_alive_normalized',
       endpoint: pathname,
       method: request.method,
-      model: policy.requestedModel,
+      model: policy.forwardedModel || policy.requestedModel,
+      requestedModel: policy.requestedModel,
+      modelRewritten: Boolean(policy.modelRewritten),
       incomingKeepAlive: policy.incomingKeepAlive,
       forwardedKeepAlive: policy.forwardedKeepAlive,
       clientIdentity: commonRecord.clientIdentity,
@@ -519,6 +540,7 @@ export async function createRouterServer(config = loadConfig()) {
     version: config.version,
     upstreamUrl: config.upstreamUrl,
     modelPolicyMode: config.modelPolicyMode,
+    rewriteRequestedModelToActive: config.rewriteRequestedModelToActive,
     protectedModelEndpoints: config.protectedModelEndpoints
   });
 

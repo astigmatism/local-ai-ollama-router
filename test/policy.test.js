@@ -53,6 +53,74 @@ test('non-active model is rejected by default', () => {
   assert.equal(result.code, 'MODEL_NOT_ACTIVE');
 });
 
+test('rewrite requested model to active preserves other request parameters', () => {
+  const result = evaluateProxyPolicy({
+    method: 'POST',
+    pathname: '/api/chat',
+    body: {
+      model: 'open-webui-workflow-base:model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: false,
+      keep_alive: '5m',
+      think: false,
+      options: {
+        temperature: 0.2,
+        num_ctx: 4096
+      }
+    },
+    activeModelInfo: { model: 'active:model' },
+    config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' })
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.requestedModel, 'open-webui-workflow-base:model');
+  assert.equal(result.forwardedModel, 'active:model');
+  assert.equal(result.modelRewritten, true);
+  assert.equal(result.sanitizedBody.model, 'active:model');
+  assert.equal(result.sanitizedBody.keep_alive, -1);
+  assert.equal(result.forwardedKeepAlive, -1);
+  assert.deepEqual(result.sanitizedBody.options, {
+    temperature: 0.2,
+    num_ctx: 4096
+  });
+  assert.equal(result.sanitizedBody.think, false);
+  assert.deepEqual(result.sanitizedBody.messages, [{ role: 'user', content: 'hi' }]);
+});
+
+test('rewrite requested model to active also fills missing model', () => {
+  const result = evaluateProxyPolicy({
+    method: 'POST',
+    pathname: '/api/chat',
+    body: { messages: [{ role: 'user', content: 'hi' }], stream: false },
+    activeModelInfo: { model: 'active:model' },
+    config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' })
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.requestedModel, null);
+  assert.equal(result.forwardedModel, 'active:model');
+  assert.equal(result.modelRewritten, true);
+  assert.equal(result.sanitizedBody.model, 'active:model');
+  assert.equal(result.sanitizedBody.keep_alive, -1);
+});
+
+test('rewrite requested model to active covers model show requests', () => {
+  const result = evaluateProxyPolicy({
+    method: 'POST',
+    pathname: '/api/show',
+    body: { model: 'open-webui-workflow-base:model', verbose: true },
+    activeModelInfo: { model: 'active:model' },
+    config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' })
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.requestedModel, 'open-webui-workflow-base:model');
+  assert.equal(result.forwardedModel, 'active:model');
+  assert.equal(result.modelRewritten, true);
+  assert.equal(result.sanitizedBody.model, 'active:model');
+  assert.equal(result.sanitizedBody.verbose, true);
+});
+
 test('missing active marker fails closed', () => {
   const result = evaluateProxyPolicy({
     method: 'POST',

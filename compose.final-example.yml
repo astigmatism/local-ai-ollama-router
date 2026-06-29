@@ -15,6 +15,7 @@ services:
       OLLAMA_UPSTREAM_URL: "http://ollama-backend:11434"
       ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"
       MODEL_POLICY_MODE: "active-only"
+      REWRITE_REQUESTED_MODEL_TO_ACTIVE: "${REWRITE_REQUESTED_MODEL_TO_ACTIVE:-false}"
       FORCE_KEEP_ALIVE: "-1"
       ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN}"
     volumes:

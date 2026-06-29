@@ -38,7 +38,7 @@ When enabled, they still require admin auth. Keep them disabled unless you inten
 
 ## Fail-closed behavior
 
-The router defaults to `MODEL_POLICY_MODE=active-only`. If no active model marker exists, model-body generation requests fail closed with `NO_ACTIVE_MODEL`.
+The router defaults to `MODEL_POLICY_MODE=active-only`. If no active model marker exists, model-body generation requests fail closed with `NO_ACTIVE_MODEL`. `REWRITE_REQUESTED_MODEL_TO_ACTIVE` defaults to `false`; enable it only for trusted compatibility clients because it intentionally makes client-supplied model names advisory rather than authoritative.
 
 ## Raw Ollama exposure
 

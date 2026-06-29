@@ -73,12 +73,15 @@ The default policy is intentionally conservative:
 
 ```text
 MODEL_POLICY_MODE=active-only
+REWRITE_REQUESTED_MODEL_TO_ACTIVE=false
 FORCE_KEEP_ALIVE=-1
 ALLOW_MODEL_MANAGEMENT=false
 USE_ACTIVE_MODEL_WHEN_MISSING=false
 ```
 
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
+
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters.
 
 ## Admin dashboard
 
