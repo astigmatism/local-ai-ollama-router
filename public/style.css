@@ -32,17 +32,29 @@ body {
 h1 { margin: 0; font-size: 1.35rem; }
 h2 { margin: 0 0 1rem; font-size: 1.05rem; }
 .subtitle { margin: .25rem 0 0; color: var(--muted); }
+.trust-note {
+  display: inline-block;
+  margin: .6rem 0 0;
+  padding: .35rem .55rem;
+  border: 1px solid rgba(210,153,34,.5);
+  border-radius: .5rem;
+  color: var(--warn);
+  background: rgba(210,153,34,.08);
+  font-size: .86rem;
+}
 main { padding: 1.25rem; }
-.auth-box, .button-row { display: flex; gap: .5rem; flex-wrap: wrap; }
-input, button {
+.action-box, .button-row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+button, .api-link {
   border: 1px solid var(--border);
   background: #0d1117;
   color: var(--text);
   border-radius: .45rem;
   padding: .55rem .75rem;
+  text-decoration: none;
+  font: inherit;
 }
 button { cursor: pointer; }
-button:hover { border-color: var(--accent); }
+button:hover, .api-link:hover { border-color: var(--accent); }
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -67,6 +79,24 @@ button:hover { border-color: var(--accent); }
   gap: 1rem;
   margin-top: 1rem;
 }
+.policy-grid { grid-template-columns: minmax(0, 1.4fr) minmax(320px, .8fr); }
+.panel-note, .empty { color: var(--muted); margin-top: -.35rem; }
+.kv {
+  display: grid;
+  grid-template-columns: minmax(180px, .45fr) minmax(0, 1fr);
+  gap: .75rem;
+  padding: .45rem 0;
+  border-bottom: 1px solid rgba(48,54,61,.7);
+}
+.kv:last-child { border-bottom: 0; }
+.kv-label { color: var(--muted); }
+.kv-value { word-break: break-word; }
+.issue {
+  border-left: 3px solid var(--warn);
+  padding: .55rem .75rem;
+  margin-bottom: .6rem;
+  background: rgba(210,153,34,.08);
+}
 .table-wrap { overflow: auto; max-height: 520px; }
 table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 th, td { border-bottom: 1px solid var(--border); padding: .45rem .5rem; text-align: left; vertical-align: top; }
@@ -86,7 +116,8 @@ pre {
 }
 .event-time { color: var(--muted); font-size: .8rem; }
 @media (max-width: 900px) {
-  .topbar, .grid { grid-template-columns: 1fr; display: block; }
-  .auth-box { margin-top: .75rem; }
+  .topbar, .grid, .kv { grid-template-columns: 1fr; display: block; }
+  .action-box { margin-top: .75rem; }
   .panel { margin-top: 1rem; }
+  .kv-label { margin-bottom: .15rem; }
 }

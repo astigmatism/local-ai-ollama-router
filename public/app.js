@@ -1,13 +1,6 @@
-const tokenInput = document.querySelector('#admin-token');
 const output = document.querySelector('#control-output');
 let lastSummary = null;
 
-tokenInput.value = localStorage.getItem('ollama-router-admin-token') || '';
-
-document.querySelector('#save-token').addEventListener('click', () => {
-  localStorage.setItem('ollama-router-admin-token', tokenInput.value.trim());
-  refresh();
-});
 document.querySelector('#refresh').addEventListener('click', refresh);
 document.querySelector('#prewarm').addEventListener('click', () => postControl('/admin/api/prewarm', {}));
 document.querySelector('#reload-config').addEventListener('click', () => postControl('/admin/api/reload-config', {}));
@@ -18,8 +11,7 @@ document.querySelector('#toggle-maintenance').addEventListener('click', () => {
 });
 
 function headers() {
-  const token = tokenInput.value.trim();
-  return token ? { 'x-admin-token': token, 'content-type': 'application/json' } : { 'content-type': 'application/json' };
+  return { 'content-type': 'application/json', accept: 'application/json' };
 }
 
 async function getJson(url) {
@@ -40,6 +32,15 @@ async function postControl(url, body) {
   }
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
 function fmt(value) {
   if (value === null || value === undefined || value === '') return 'none';
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
@@ -47,25 +48,86 @@ function fmt(value) {
   return String(value);
 }
 
+function text(value) {
+  return escapeHtml(fmt(value));
+}
+
 function card(label, value, className = '') {
-  return `<div class="card"><div class="label">${label}</div><div class="value ${className}">${fmt(value)}</div></div>`;
+  return `<div class="card"><div class="label">${text(label)}</div><div class="value ${className}">${text(value)}</div></div>`;
+}
+
+function modelContext(summary) {
+  const marker = summary.activeModel?.raw || {};
+  const loaded = summary.activeLoadedState?.raw || {};
+  return marker.context || marker.num_ctx || marker.numCtx || marker.options?.num_ctx || loaded.context || loaded.context_length || 'not reported';
+}
+
+function uptime(value) {
+  const seconds = Number(value || 0);
+  if (!Number.isFinite(seconds)) return 'unknown';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m ${seconds % 60}s`;
 }
 
 function renderCards(summary) {
   const loaded = summary.activeLoadedState || {};
-  const upstreamClass = summary.upstream.ok ? 'good' : 'danger';
+  const upstreamClass = summary.upstream?.ok ? 'good' : 'danger';
   const loadedClass = loaded.loaded ? 'good' : 'warn';
   const metrics = summary.metrics || {};
+  const config = summary.config || {};
   document.querySelector('#cards').innerHTML = [
-    card('Upstream Ollama', summary.upstream.ok ? 'healthy' : 'unavailable', upstreamClass),
-    card('Active model', summary.activeModel.model),
+    card('Upstream Ollama', summary.upstream?.ok ? 'healthy' : 'unavailable', upstreamClass),
+    card('Active model', summary.activeModel?.model),
     card('Active loaded', loaded.loaded ? 'loaded' : 'not loaded', loadedClass),
-    card('Until / expires', loaded.until || 'unknown'),
+    card('Context', modelContext(summary)),
+    card('Loaded until', loaded.until || 'unknown'),
+    card('Forced keep_alive', config.forcedKeepAlive),
+    card('Router policy', config.modelPolicyMode),
+    card('Model rewrite', config.rewriteRequestedModelToActive ? 'enabled' : 'disabled', config.rewriteRequestedModelToActive ? 'warn' : ''),
+    card('Uptime', uptime(summary.router?.uptimeSeconds)),
     card('Requests', metrics.totalRequests || 0),
     card('Keep-alive rewrites', metrics.keepAliveNormalizations || 0),
-    card('Rejected', metrics.rejectedRequests || 0, metrics.rejectedRequests ? 'warn' : 'good'),
-    card('Maintenance', summary.router.maintenanceMode ? 'enabled' : 'disabled', summary.router.maintenanceMode ? 'warn' : 'good')
+    card('Rejected/errors', `${metrics.rejectedRequests || 0} / ${metrics.upstreamErrors || 0}`, metrics.rejectedRequests || metrics.upstreamErrors ? 'warn' : 'good')
   ].join('');
+}
+
+function kv(label, value) {
+  return `<div class="kv"><div class="kv-label">${text(label)}</div><div class="kv-value">${text(value)}</div></div>`;
+}
+
+function renderPolicy(summary) {
+  const config = summary.config || {};
+  const active = summary.activeModel || {};
+  const router = summary.router || {};
+  const admin = router.admin || {};
+  document.querySelector('#policy').innerHTML = [
+    kv('API listener', `${router.api?.host || config.host}:${router.api?.port || config.port}`),
+    kv('Admin listener', admin.enabled ? `${admin.bindHost}:${admin.port}` : 'disabled'),
+    kv('Admin portal auth', admin.authRequired ? 'required' : 'not required'),
+    kv('Policy mode', config.modelPolicyMode),
+    kv('Rewrite requested model to active', config.rewriteRequestedModelToActive),
+    kv('Forced keep_alive', config.forcedKeepAlive),
+    kv('Protected endpoints', (config.protectedModelEndpoints || []).join(', ')),
+    kv('Active marker source', active.source),
+    kv('Active marker loaded from', active.loadedFrom),
+    kv('Marker keep_alive', active.keep_alive),
+    kv('Marker updated at', active.updated_at || active.file_mtime),
+    kv('Upstream URL', config.upstreamUrl)
+  ].join('');
+}
+
+function renderIssues(summary) {
+  const issues = summary.recentRejectsOrErrors || [];
+  if (!issues.length) {
+    document.querySelector('#issues').innerHTML = '<p class="empty">No recent rejects or upstream errors.</p>';
+    return;
+  }
+  document.querySelector('#issues').innerHTML = issues.map((row) => `<div class="issue">
+    <div><strong>${text(row.errorCode || row.responseStatus || row.status)}</strong> ${text(row.errorSummary || row.endpoint)}</div>
+    <div class="event-time">${text(row.ts)} · ${text(row.method)} ${text(row.endpoint)} · ${text(row.clientIdentity)}</div>
+  </div>`).join('');
 }
 
 function renderRequests(rows) {
@@ -74,20 +136,24 @@ function renderRequests(rows) {
   const body = rows.map((row) => {
     const statusClass = row.rejected || row.upstreamError ? 'warn' : 'good';
     return `<tr>
-      <td>${fmt(row.ts)}</td>
-      <td>${fmt(row.clientIdentity)}<br><span class="event-time">${fmt(row.sourceIp)}</span></td>
-      <td>${fmt(row.method)} ${fmt(row.endpoint)}</td>
-      <td>${fmt(row.requestedModel)}</td>
-      <td>in: ${fmt(row.incomingKeepAlive)}<br>out: ${fmt(row.forwardedKeepAlive)}</td>
-      <td class="${statusClass}">${fmt(row.responseStatus || row.status)}</td>
-      <td>${fmt(row.latencyMs)} ms</td>
+      <td>${text(row.ts)}</td>
+      <td>${text(row.clientIdentity)}<br><span class="event-time">${text(row.sourceIp)}</span></td>
+      <td>${text(row.method)} ${text(row.endpoint)}</td>
+      <td>${text(row.modelRewritten ? `${row.requestedModel} -> ${row.forwardedModel}` : row.requestedModel)}</td>
+      <td>in: ${text(row.incomingKeepAlive)}<br>out: ${text(row.forwardedKeepAlive)}</td>
+      <td class="${statusClass}">${text(row.responseStatus || row.status)}</td>
+      <td>${text(row.latencyMs)} ms</td>
     </tr>`;
   }).join('');
   table.innerHTML = header + body;
 }
 
 function renderEvents(events) {
-  document.querySelector('#events').innerHTML = events.map((event) => `<div class="event"><div>${fmt(event.type)}</div><div class="event-time">${fmt(event.ts)}</div><pre>${JSON.stringify(event, null, 2)}</pre></div>`).join('');
+  if (!events.length) {
+    document.querySelector('#events').innerHTML = '<p class="empty">No events yet.</p>';
+    return;
+  }
+  document.querySelector('#events').innerHTML = events.map((event) => `<div class="event"><div>${text(event.type)}</div><div class="event-time">${text(event.ts)}</div><pre>${text(JSON.stringify(event, null, 2))}</pre></div>`).join('');
 }
 
 async function refresh() {
@@ -99,12 +165,16 @@ async function refresh() {
     ]);
     lastSummary = summary;
     renderCards(summary);
+    renderPolicy(summary);
+    renderIssues(summary);
     renderRequests(requests.requests || []);
     renderEvents(events.events || []);
     document.querySelector('#ps').textContent = JSON.stringify(summary.ollamaPs, null, 2);
     document.querySelector('#metrics').textContent = JSON.stringify(summary.metrics, null, 2);
   } catch (error) {
     document.querySelector('#cards').innerHTML = card('Dashboard error', error.message, 'danger');
+    document.querySelector('#policy').innerHTML = '';
+    document.querySelector('#issues').innerHTML = '';
   }
 }
 

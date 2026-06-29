@@ -1,12 +1,12 @@
 # Local AI Ollama Router
 
-A Docker-ready, Ollama-compatible router that sits between local AI clients and the real Ollama container. It enforces active-model policy, overwrites protected requests with `keep_alive: -1`, preserves streaming responses, persists request history, extracts Ollama response telemetry, and provides a small admin dashboard.
+A Docker-ready, Ollama-compatible router that sits between local AI clients and the real Ollama container. It enforces active-model policy, overwrites protected requests with `keep_alive: -1`, preserves streaming responses, persists request history, extracts Ollama response telemetry, and serves a simple human admin portal on a separate port.
 
-This project is designed for the current local AI topology where OpenWebUI, ComfyUI, local apps, and a voice assistant should stop talking directly to raw Ollama and should instead call the router.
+This project is designed for the local AI topology where Open WebUI, ComfyUI, local apps, and a voice assistant should call the router instead of raw Ollama.
 
 ## What this gives you
 
-- Ollama-compatible routes for the first migration phase:
+- Ollama-compatible API on the router API listener, normally `http://192.168.1.21:11434`:
   - `GET /api/tags`
   - `POST /api/show`
   - `POST /api/chat`
@@ -16,37 +16,50 @@ This project is designed for the current local AI topology where OpenWebUI, Comf
 - Optional policy-aware routes:
   - `POST /api/embed`
   - `POST /api/embeddings`
-  - model-management routes are disabled by default and require admin auth when enabled
+  - model-management routes are disabled by default and require legacy admin auth when enabled
+- Separate browser admin portal, normally `http://192.168.1.21:11435/` or `http://192.168.1.21:11435/admin`.
+- No token or login for the browser admin portal. It is intended for trusted local/LAN use only.
 - Active-model fail-closed policy by default.
 - Request-level `keep_alive` normalization to `-1` for protected active-model requests.
 - Streaming and non-streaming pass-through.
 - Persistent request log in JSONL.
 - Persistent activity/event log in JSONL.
-- Admin dashboard at `/admin/`.
 - Telemetry extraction from Ollama final response chunks and non-streaming responses.
 - Optional GPU telemetry through `nvidia-smi` when available.
 - No runtime npm dependencies; the application runs on Node.js 22 built-ins.
 
-## Quick start: transition port
+## Ports and URLs
 
-The default compose file publishes the router on `192.168.1.21:11435` so it can run beside the current raw Ollama service on `11434`.
+| Port | Purpose | URL |
+|---:|---|---|
+| `11434` | Ollama-compatible router API for clients | `http://192.168.1.21:11434/api/version` |
+| `11435` | Human admin portal for local/LAN operators | `http://192.168.1.21:11435/` |
+
+The API port remains Ollama-compatible. The admin portal is intentionally not buried under the Ollama API URL structure. The old same-port `/admin/api/*` machine endpoints are still present for compatibility and still honor `ADMIN_TOKEN` when it is set, but the browser portal and its admin-port JSON APIs do not require a token.
+
+## Quick start
 
 ```bash
 cd /home/astigmatism/apps/local-ai-ollama-router
 cp .env.example .env
 
-# Set ADMIN_TOKEN in .env before exposing the admin UI on the LAN.
-# Then write an active model marker for initial testing:
+# Write an active model marker for initial testing:
 ./scripts/write-active-model.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser' nighttime
 
 docker compose --env-file .env up --build -d
-curl http://192.168.1.21:11435/api/version
+curl http://192.168.1.21:11434/api/version
 ```
 
-Open the admin dashboard at:
+Open the admin portal in a browser:
 
 ```text
-http://192.168.1.21:11435/admin/
+http://192.168.1.21:11435/
+```
+
+The same dashboard is also available at:
+
+```text
+http://192.168.1.21:11435/admin
 ```
 
 ## Active model source of truth
@@ -83,45 +96,44 @@ For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/em
 
 Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters.
 
-## Admin dashboard
+## Admin portal
 
-The dashboard shows:
+The admin portal is served by its own listener:
 
-- router health and uptime
-- raw Ollama health
-- active model marker and source
-- loaded model state from `/api/ps`
-- request history
-- keep-alive rewrites
-- rejections
-- latency and token-throughput metrics
-- activity timeline
+```env
+ADMIN_ENABLED=true
+ADMIN_BIND_HOST=0.0.0.0
+ADMIN_PORT=11435
+```
+
+It shows:
+
+- router API/admin listener status and uptime
+- raw Ollama upstream health
+- active model marker, profile, source, and marker keep-alive
+- loaded model state from upstream `/api/ps`
+- model context hints when present in the active marker or loaded-model data
+- forced keep-alive status
+- router policy mode and model rewrite status
+- request counts, keep-alive rewrite counts, rejections, and upstream errors
+- recent reject/error information
+- request history and activity timeline
 - optional GPU telemetry
 
-Control actions:
+Control actions are available directly from the portal without a token:
 
 - prewarm active model
 - run test chat against the active model
 - reload active marker
 - toggle maintenance mode
 
-If `ADMIN_TOKEN` is set, admin APIs require either:
-
-```text
-Authorization: Bearer <token>
-```
-
-or:
-
-```text
-X-Admin-Token: <token>
-```
+Because the portal is unauthenticated by design, expose `11435` only on trusted local/LAN interfaces. Do not publish it to the public internet.
 
 ## Smoke test
 
 ```bash
-ROUTER_URL=http://192.168.1.21:11435 \
-ADMIN_TOKEN='<your-admin-token>' \
+ROUTER_URL=http://192.168.1.21:11434 \
+ADMIN_URL=http://192.168.1.21:11435 \
 ./scripts/curl-smoke-test.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser'
 ```
 
@@ -133,13 +145,15 @@ docker exec local-ai-llm-legacy-ollama ollama ps
 
 ## Final cutover shape
 
-After OpenWebUI, ComfyUI, the voice assistant, and local apps are verified through the router:
+After Open WebUI, ComfyUI, the voice assistant, and local apps are verified through the router:
 
 1. Remove raw Ollama's LAN `ports` mapping.
 2. Keep raw Ollama reachable only on an internal Docker network.
-3. Publish the router on `192.168.1.21:11434`.
-4. Confirm `http://192.168.1.21:11434/api/version` is the router-backed endpoint.
-5. Confirm no clients resolve `ollama` to raw Ollama unless that is deliberate.
+3. Publish the router API on `192.168.1.21:11434`.
+4. Publish the router admin portal on `192.168.1.21:11435`.
+5. Confirm `http://192.168.1.21:11434/api/version` is the router-backed endpoint.
+6. Confirm `http://192.168.1.21:11435/` opens the no-token dashboard.
+7. Confirm no clients resolve `ollama` to raw Ollama unless that is deliberate.
 
 See `docs/DEPLOYMENT_HANDOFF.md` for the full phased migration plan.
 
@@ -147,14 +161,14 @@ See `docs/DEPLOYMENT_HANDOFF.md` for the full phased migration plan.
 
 ```text
 src/                 Router, policy, proxy, telemetry, metrics, storage
-public/              Admin viewport UI
+public/              Admin portal UI served on the admin listener
 docs/                Architecture, deployment, API, test, and security notes
 docs/source/         Original uploaded topology handoff
 runtime/             Active model marker location
 data/                Runtime JSONL logs, gitignored
 scripts/             Smoke tests and utility helpers
 test/                Node built-in test suite
-compose.yml          Transition compose file, router on 11435
+compose.yml          Compose file exposing API 11434 and admin portal 11435
 compose.final-example.yml  Example final cutover compose shape
 Dockerfile           Node.js 22 runtime image
 ```

@@ -2,14 +2,38 @@
 
 All configuration is environment-variable driven. `.env.example` is the starting point for Docker Compose.
 
-## Listener
+## Router API listener
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `HOST` | `0.0.0.0` | Interface inside the container. |
-| `PORT` | `11434` | Router port inside the container. |
-| `ROUTER_BIND_IP` | `192.168.1.21` | Host IP used by Compose. |
-| `ROUTER_PUBLIC_PORT` | `11435` | Host port during transition. |
+| `HOST` | `0.0.0.0` | Interface for the Ollama-compatible API listener inside the container. |
+| `PORT` | `11434` | Ollama-compatible API port inside the container. |
+| `ROUTER_BIND_IP` | `192.168.1.21` | Host IP used by Compose for published ports. |
+| `ROUTER_PUBLIC_PORT` | `11434` | Host port for the Ollama-compatible router API. |
+
+Clients should use the API listener, for example:
+
+```text
+http://192.168.1.21:11434
+```
+
+## Admin portal listener
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `ADMIN_ENABLED` | `true` | Starts the separate browser/admin listener when true. |
+| `ADMIN_BIND_HOST` | `0.0.0.0` | Interface for the admin listener inside the container. |
+| `ADMIN_PORT` | `11435` | Admin listener port inside the container. |
+| `ADMIN_PUBLIC_PORT` | `11435` | Host port used by Compose for the admin portal. |
+
+The human dashboard is available at:
+
+```text
+http://192.168.1.21:11435/
+http://192.168.1.21:11435/admin
+```
+
+The admin portal and its admin-port JSON APIs are intentionally unauthenticated. This is a local/LAN trust assumption; do not publish the admin port to untrusted networks.
 
 ## Upstream Ollama
 
@@ -37,6 +61,8 @@ Marker format:
 }
 ```
 
+The dashboard also displays optional context hints if the marker includes fields such as `context`, `num_ctx`, `numCtx`, or `options.num_ctx`.
+
 ## Policy
 
 | Variable | Default | Purpose |
@@ -47,16 +73,16 @@ Marker format:
 | `FORCE_KEEP_ALIVE` | `-1` | Forwarded keep-alive for active protected requests. |
 | `PROTECTED_MODEL_ENDPOINTS` | `/api/chat,/api/generate,/api/embed,/api/embeddings` | Endpoints receiving keep-alive rewrite. |
 | `USE_ACTIVE_MODEL_WHEN_MISSING` | `false` | When true, missing model is filled with active model. Default false for compatibility/fail-closed clarity. |
-| `ALLOW_MODEL_MANAGEMENT` | `false` | Enables pull/create/copy/push/delete only with admin auth. |
+| `ALLOW_MODEL_MANAGEMENT` | `false` | Enables pull/create/copy/push/delete only with legacy admin auth when `ADMIN_TOKEN` is set. |
 
-## Admin authentication
+## Legacy admin token
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `ADMIN_TOKEN` | `change-me-before-lan-exposure` | Required token when non-empty. |
-| `ADMIN_SESSION_HEADER` | `X-Admin-Token` | Header accepted by admin APIs. |
+| `ADMIN_TOKEN` | `change-me-before-lan-exposure` | Optional token for legacy same-port `/admin/api/*` endpoints and model-management authorization on the API listener. It is not required by the separate browser admin portal. |
+| `ADMIN_SESSION_HEADER` | `X-Admin-Token` | Header accepted by legacy admin auth. |
 
-Admin requests may use either:
+Legacy same-port admin requests may use either:
 
 ```text
 Authorization: Bearer <token>
@@ -67,6 +93,8 @@ or:
 ```text
 X-Admin-Token: <token>
 ```
+
+The browser portal on `ADMIN_PORT` ignores this token and remains no-login by design.
 
 ## Persistence
 

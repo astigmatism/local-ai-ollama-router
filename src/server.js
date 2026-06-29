@@ -101,6 +101,13 @@ async function buildSummary(context) {
     getGpuTelemetry(context.config)
   ]);
   const activeLoadedState = activeModel.model ? activeModelLoadedState(ps, activeModel.model) : { loaded: false, until: null, raw: null };
+  const recentRequests = context.store.recentRequests(100);
+  const recentRejectsOrErrors = recentRequests
+    .filter((record) => record?.rejected || record?.upstreamError || Number(record?.responseStatus || record?.status || 0) >= 400)
+    .slice(0, 10);
+  const recentErrorEvents = context.store.recentEvents(100)
+    .filter((event) => /reject|error|fail/i.test(String(event?.type || '')))
+    .slice(0, 10);
   return {
     generatedAt: nowIso(),
     router: {
@@ -108,7 +115,17 @@ async function buildSummary(context) {
       version: context.config.version,
       startedAt: context.state.startedAt,
       maintenanceMode: context.state.maintenanceMode,
-      uptimeSeconds: Math.round(process.uptime())
+      uptimeSeconds: Math.round(process.uptime()),
+      api: {
+        host: context.config.host,
+        port: context.config.port
+      },
+      admin: {
+        enabled: context.config.adminEnabled,
+        bindHost: context.config.adminBindHost,
+        port: context.config.adminPort,
+        authRequired: false
+      }
     },
     config: publicConfig(context.config),
     activeModel,
@@ -117,12 +134,14 @@ async function buildSummary(context) {
     activeLoadedState,
     gpu,
     metrics: context.metrics.snapshot(),
+    recentRejectsOrErrors,
+    recentErrorEvents,
     logs: context.store.paths()
   };
 }
 
-async function handleAdminApi(request, response, pathname, context) {
-  if (!requireAdmin(request, response, context.config)) return;
+async function handleAdminApi(request, response, pathname, context, { requireAuth = true } = {}) {
+  if (requireAuth && !requireAdmin(request, response, context.config)) return;
 
   if (request.method === 'GET' && pathname === '/admin/api/summary') {
     sendJson(response, 200, await buildSummary(context));
@@ -473,6 +492,72 @@ async function handleProxy(request, response, url, context) {
   }
 }
 
+function sendRedirect(response, location) {
+  response.writeHead(302, {
+    location,
+    'cache-control': 'no-store'
+  });
+  response.end();
+}
+
+function hostnameFromRequest(request, fallbackHost = '127.0.0.1') {
+  const hostHeader = typeof request.headers.host === 'string' ? request.headers.host : '';
+  if (!hostHeader) return fallbackHost;
+  if (hostHeader.startsWith('[')) {
+    const end = hostHeader.indexOf(']');
+    if (end !== -1) return hostHeader.slice(0, end + 1);
+  }
+  return hostHeader.split(':')[0] || fallbackHost;
+}
+
+function adminRedirectLocation(request, url, config) {
+  const host = hostnameFromRequest(request, config.adminBindHost || config.host || '127.0.0.1');
+  return `http://${host}:${config.adminPort}${url.pathname}${url.search || ''}`;
+}
+
+async function serveAdminDashboardAsset(response, pathname) {
+  const relativePath = pathname === '/' || pathname === '/admin' || pathname === '/admin/'
+    ? 'index.html'
+    : pathname.slice('/admin/'.length);
+  await serveStaticFile(response, PUBLIC_ROOT, relativePath || 'index.html');
+}
+
+async function handleAdminRequest(request, response, context) {
+  const url = new URL(request.url || '/', 'http://router-admin.local');
+  const pathname = url.pathname;
+
+  try {
+    if (request.method === 'GET' && pathname === '/health') {
+      await handleHealth(response, context);
+      return;
+    }
+
+    if (pathname.startsWith('/admin/api/')) {
+      await handleAdminApi(request, response, pathname, context, { requireAuth: false });
+      return;
+    }
+
+    if (request.method === 'GET' && (pathname === '/' || pathname === '/admin' || pathname.startsWith('/admin/'))) {
+      await serveAdminDashboardAsset(response, pathname);
+      return;
+    }
+
+    if (pathname.startsWith('/api/')) {
+      sendJson(response, 404, errorPayload('API_NOT_ON_ADMIN_PORT', 'The Ollama-compatible API is served on the router API port, not the admin portal port.'));
+      return;
+    }
+
+    sendJson(response, 404, errorPayload('NOT_FOUND', 'Admin portal route not found.'));
+  } catch (error) {
+    console.error('unhandled admin request error', error);
+    if (!response.headersSent) {
+      sendJson(response, 500, errorPayload('INTERNAL_ERROR', error.message));
+    } else {
+      response.destroy(error);
+    }
+  }
+}
+
 async function handleRequest(request, response, context) {
   const url = new URL(request.url || '/', 'http://router.local');
   const pathname = url.pathname;
@@ -488,19 +573,17 @@ async function handleRequest(request, response, context) {
       return;
     }
 
-    if (pathname === '/admin') {
-      response.writeHead(302, { location: '/admin/' });
-      response.end();
-      return;
-    }
-
     if (pathname.startsWith('/admin/api/')) {
-      await handleAdminApi(request, response, pathname, context);
+      await handleAdminApi(request, response, pathname, context, { requireAuth: true });
       return;
     }
 
-    if (request.method === 'GET' && pathname.startsWith('/admin/')) {
-      await serveStaticFile(response, PUBLIC_ROOT, pathname.slice('/admin/'.length) || 'index.html');
+    if (request.method === 'GET' && (pathname === '/admin' || pathname.startsWith('/admin/'))) {
+      if (context.config.adminEnabled) {
+        sendRedirect(response, adminRedirectLocation(request, url, context.config));
+      } else {
+        sendJson(response, 404, errorPayload('ADMIN_PORT_DISABLED', 'The separate admin portal listener is disabled.'));
+      }
       return;
     }
 
@@ -547,21 +630,41 @@ export async function createRouterServer(config = loadConfig()) {
   const server = http.createServer((request, response) => {
     void handleRequest(request, response, context);
   });
-  return { server, context };
+  const adminServer = config.adminEnabled
+    ? http.createServer((request, response) => {
+      void handleAdminRequest(request, response, context);
+    })
+    : null;
+  return { server, adminServer, context };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = loadConfig();
-  const { server } = await createRouterServer(config);
+  const { server, adminServer } = await createRouterServer(config);
   server.listen(config.port, config.host, () => {
-    console.log(`${config.appName} ${config.version} listening on http://${config.host}:${config.port}`);
+    console.log(`${config.appName} ${config.version} API listening on http://${config.host}:${config.port}`);
     console.log(`Upstream Ollama: ${config.upstreamUrl}`);
     console.log(`Active model marker: ${config.activeModelFile}`);
   });
 
+  if (adminServer) {
+    adminServer.listen(config.adminPort, config.adminBindHost, () => {
+      console.log(`${config.appName} ${config.version} admin portal listening on http://${config.adminBindHost}:${config.adminPort}`);
+      console.log('Admin portal authentication: disabled by design for trusted local/LAN use');
+    });
+  } else {
+    console.log('Admin portal listener disabled by ADMIN_ENABLED=false');
+  }
+
   const shutdown = (signal) => {
     console.log(`Received ${signal}; shutting down.`);
-    server.close(() => process.exit(0));
+    let remaining = adminServer ? 2 : 1;
+    const done = () => {
+      remaining -= 1;
+      if (remaining <= 0) process.exit(0);
+    };
+    server.close(done);
+    if (adminServer) adminServer.close(done);
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on('SIGTERM', shutdown);

@@ -1,6 +1,24 @@
 # API Reference
 
+## Port split
+
+| Listener | Default | Purpose |
+|---|---:|---|
+| Router API | `11434` | Ollama-compatible API for Open WebUI, ComfyUI, and local clients. |
+| Admin portal | `11435` | Human browser dashboard and admin-port JSON APIs. No token or login. |
+
+The browser admin portal is available at both:
+
+```text
+http://<host>:11435/
+http://<host>:11435/admin
+```
+
+The admin portal is intentionally unauthenticated for trusted local/LAN use. Do not expose it to untrusted networks.
+
 ## Ollama-compatible API
+
+These routes are served on the router API listener, normally `http://<host>:11434`.
 
 ### `GET /`
 
@@ -24,7 +42,7 @@ Passes through to raw Ollama.
 
 ### `POST /api/show`
 
-Passes through to raw Ollama. This endpoint is considered safe/status-like by default.
+Passes through to raw Ollama. This endpoint is considered safe/status-like by default. When `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, `/api/show` model names are also rewritten to the active model.
 
 ### `POST /api/chat`
 
@@ -34,6 +52,7 @@ Policy-enforced. Default behavior:
 - requires `body.model`
 - rejects non-active model
 - overwrites `keep_alive` to `-1` for active model
+- preserves non-model request fields such as `messages`, `stream`, `think`, `options`, and `format`
 - streams response when `stream` is omitted or true
 - captures final usage fields when available
 
@@ -43,7 +62,7 @@ Same policy and streaming behavior as `/api/chat`.
 
 ### `POST /api/embed` and `POST /api/embeddings`
 
-Policy-enforced. Default behavior requires the active model and rewrites `keep_alive` if present or protected.
+Policy-enforced. Default behavior requires the active model and rewrites `keep_alive` for protected active-model requests.
 
 ### Model-management endpoints
 
@@ -57,7 +76,7 @@ POST   /api/push
 DELETE /api/delete
 ```
 
-To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must include admin authorization.
+To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must include legacy admin authorization on the router API listener when `ADMIN_TOKEN` is set.
 
 ## Router errors
 
@@ -78,19 +97,20 @@ Common codes:
 |---|---|
 | `NO_ACTIVE_MODEL` | No active marker was found and policy is fail-closed. |
 | `MODEL_REQUIRED` | Generation request did not include a model. |
-| `MODEL_NOT_ACTIVE` | Requested model does not match active model. |
+| `MODEL_NOT_ACTIVE` | Requested/effective model does not match active model. |
 | `MODEL_MANAGEMENT_DISABLED` | Pull/create/delete/copy/push disabled. |
-| `ADMIN_REQUIRED` | Admin auth required. |
+| `ADMIN_REQUIRED` | Legacy admin auth required for a gated model-management endpoint. |
 | `MAINTENANCE_MODE` | Router maintenance mode rejects generation. |
 | `UPSTREAM_REQUEST_FAILED` | Raw Ollama request failed before response. |
+| `API_NOT_ON_ADMIN_PORT` | `/api/*` was requested from the admin portal listener instead of the router API listener. |
 
-## Admin API
+## Admin portal JSON API on `11435`
 
-All admin APIs require auth when `ADMIN_TOKEN` is set.
+These routes are used by the browser dashboard and do not require a token on the admin listener.
 
 ### `GET /admin/api/summary`
 
-Returns router config summary, active model marker, upstream health, `/api/ps`, active loaded state, optional GPU telemetry, metrics, and log paths.
+Returns router config summary, active model marker, upstream health, `/api/ps`, active loaded state, optional GPU telemetry, metrics, recent reject/error records, and log paths.
 
 ### `GET /admin/api/requests?limit=100`
 
@@ -106,7 +126,7 @@ Returns the metrics snapshot.
 
 ### `GET /admin/api/config`
 
-Returns safe public config. It does not return the admin token.
+Returns safe public config. It does not return the legacy admin token.
 
 ### `POST /admin/api/prewarm`
 
@@ -135,3 +155,7 @@ Body:
 ```
 
 When enabled, model-body generation endpoints are rejected while safe status endpoints continue to work.
+
+## Legacy same-port admin API
+
+For backward compatibility, the router API listener still accepts `/admin/api/*`. Those machine-readable endpoints require `Authorization: Bearer <token>` or `X-Admin-Token: <token>` when `ADMIN_TOKEN` is set. The separate browser portal on `11435` ignores this token requirement by design.

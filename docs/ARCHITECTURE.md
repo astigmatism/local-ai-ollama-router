@@ -25,7 +25,7 @@ This is enforced at the router so individual clients do not need to remember or 
 
 ### HTTP router
 
-`src/server.js` owns the Node.js HTTP server, route dispatch, admin endpoints, and Ollama-compatible proxy path.
+`src/server.js` owns the Node.js HTTP servers, route dispatch, admin endpoints, and Ollama-compatible proxy path. It starts two listeners by default: the Ollama-compatible API listener on `PORT` (`11434`) and the separate human admin listener on `ADMIN_PORT` (`11435`).
 
 ### Policy engine
 
@@ -48,9 +48,9 @@ The proxy forwards sanitized JSON bodies to raw Ollama and streams response chun
 
 `src/metrics.js` maintains in-memory metrics from request records. `src/fs-store.js` persists request and event logs as JSONL files under `/app/data`.
 
-### Admin viewport
+### Admin portal
 
-`public/` contains a no-build dashboard served under `/admin/`. It uses admin JSON APIs to show active model state, loaded model status, request history, events, metrics, and control actions.
+`public/` contains a no-build dashboard served by the separate admin listener at `/` and `/admin`. It uses unauthenticated admin-port JSON APIs under `/admin/api/*` to show active model state, loaded model status, request history, recent rejects/errors, events, metrics, and control actions. The legacy same-port `/admin/api/*` route remains available on the API listener and still honors `ADMIN_TOKEN` when set.
 
 ## Compatibility surface
 
@@ -116,9 +116,9 @@ Events capture operational changes:
 
 ## Deployment states
 
-### Phase 1: sidecar
+### Phase 1: API/admin split
 
-The router publishes `192.168.1.21:11435->11434` and forwards to raw Ollama at `http://ollama:11434`.
+The router publishes the Ollama-compatible API on `192.168.1.21:11434` and the human admin portal on `192.168.1.21:11435`. It forwards to raw Ollama at `http://ollama:11434` on the internal Docker network.
 
 ### Phase 2: client migration
 
@@ -126,4 +126,4 @@ Repoint OpenWebUI, ComfyUI, the voice assistant, and local apps to the router. C
 
 ### Phase 3: final cutover
 
-Raw Ollama loses LAN port exposure. The router takes the public compatibility port `192.168.1.21:11434`.
+Raw Ollama loses LAN port exposure. The router remains the public compatibility endpoint at `192.168.1.21:11434`, and the no-token admin portal remains on `192.168.1.21:11435` for trusted local/LAN operators.

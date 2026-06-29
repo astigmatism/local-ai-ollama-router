@@ -6,10 +6,16 @@ services:
     container_name: local-ai-ollama-router
     restart: unless-stopped
     ports:
-      - "${ROUTER_BIND_IP:-192.168.1.21}:${ROUTER_PUBLIC_PORT:-11435}:11434"
+      # 11434 = Ollama-compatible router API for Open WebUI, ComfyUI, and local clients.
+      - "${ROUTER_BIND_IP:-192.168.1.21}:${ROUTER_PUBLIC_PORT:-11434}:11434"
+      # 11435 = unauthenticated human admin portal for trusted local/LAN use.
+      - "${ROUTER_BIND_IP:-192.168.1.21}:${ADMIN_PUBLIC_PORT:-11435}:${ADMIN_PORT:-11435}"
     environment:
       HOST: "0.0.0.0"
       PORT: "11434"
+      ADMIN_ENABLED: "${ADMIN_ENABLED:-true}"
+      ADMIN_BIND_HOST: "${ADMIN_BIND_HOST:-0.0.0.0}"
+      ADMIN_PORT: "${ADMIN_PORT:-11435}"
       OLLAMA_UPSTREAM_URL: "${OLLAMA_UPSTREAM_URL:-http://ollama:11434}"
       OLLAMA_UPSTREAM_TIMEOUT_MS: "${OLLAMA_UPSTREAM_TIMEOUT_MS:-900000}"
       ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"

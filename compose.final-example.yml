@@ -1,5 +1,6 @@
-# Example final-state compose shape after cutover. This file is intentionally not
-# the default because the first migration phase should run the router on 11435.
+# Example final-state compose shape after cutover. Raw Ollama should have no LAN
+# ports mapping; clients should use 11434 on this router and humans should use
+# the separate 11435 admin portal.
 services:
   ai-router:
     build:
@@ -8,16 +9,23 @@ services:
     container_name: local-ai-ollama-router
     restart: unless-stopped
     ports:
+      # 11434 = Ollama-compatible router API.
       - "${ROUTER_BIND_IP:-192.168.1.21}:11434:11434"
+      # 11435 = unauthenticated human admin portal.
+      - "${ROUTER_BIND_IP:-192.168.1.21}:${ADMIN_PUBLIC_PORT:-11435}:${ADMIN_PORT:-11435}"
     environment:
       HOST: "0.0.0.0"
       PORT: "11434"
+      ADMIN_ENABLED: "${ADMIN_ENABLED:-true}"
+      ADMIN_BIND_HOST: "${ADMIN_BIND_HOST:-0.0.0.0}"
+      ADMIN_PORT: "${ADMIN_PORT:-11435}"
       OLLAMA_UPSTREAM_URL: "http://ollama-backend:11434"
       ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"
       MODEL_POLICY_MODE: "active-only"
       REWRITE_REQUESTED_MODEL_TO_ACTIVE: "${REWRITE_REQUESTED_MODEL_TO_ACTIVE:-false}"
       FORCE_KEEP_ALIVE: "-1"
-      ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN}"
+      ALLOW_MODEL_MANAGEMENT: "${ALLOW_MODEL_MANAGEMENT:-false}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-before-lan-exposure}"
     volumes:
       - ./data:/app/data
       - ./runtime:/app/runtime

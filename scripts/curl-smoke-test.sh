@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROUTER_URL="${ROUTER_URL:-http://192.168.1.21:11435}"
-ADMIN_TOKEN="${ADMIN_TOKEN:-change-me-before-lan-exposure}"
+ROUTER_URL="${ROUTER_URL:-http://192.168.1.21:11434}"
+ADMIN_URL="${ADMIN_URL:-http://192.168.1.21:11435}"
 MODEL="${1:-}"
 
 if [[ -z "$MODEL" ]]; then
@@ -16,18 +16,19 @@ if [[ -z "$MODEL" ]]; then
   exit 2
 fi
 
-echo "Router URL: $ROUTER_URL"
+echo "Router API URL: $ROUTER_URL"
+echo "Admin portal URL: $ADMIN_URL"
 echo "Active model: $MODEL"
 
-echo "1. Version"
+echo "1. Version through Ollama-compatible router API"
 curl -fsS "$ROUTER_URL/api/version" | jq . || curl -fsS "$ROUTER_URL/api/version"
 
-echo "2. Tags"
+echo "2. Tags through Ollama-compatible router API"
 curl -fsS "$ROUTER_URL/api/tags" >/tmp/router-tags.json
 cat /tmp/router-tags.json | jq '.models | length' || cat /tmp/router-tags.json
 
-echo "3. Admin summary"
-curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" "$ROUTER_URL/admin/api/summary" | jq '.activeModel, .activeLoadedState, .metrics'
+echo "3. Unauthenticated admin portal summary on separate admin port"
+curl -fsS "$ADMIN_URL/admin/api/summary" | jq '.activeModel, .activeLoadedState, .metrics'
 
 echo "4. Chat without keep_alive; router should add keep_alive=-1"
 curl -fsS "$ROUTER_URL/api/chat" \
@@ -42,4 +43,4 @@ curl -fsS "$ROUTER_URL/api/chat" \
   -d "{\"model\":\"$MODEL\",\"stream\":false,\"keep_alive\":\"5m\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with ok.\"}]}" | jq '.done, .eval_count, .eval_duration' || true
 
 echo "6. Recent requests should show forwardedKeepAlive=-1"
-curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" "$ROUTER_URL/admin/api/requests?limit=5" | jq '.requests[] | {ts, clientIdentity, endpoint, requestedModel, incomingKeepAlive, forwardedKeepAlive, responseStatus}'
+curl -fsS "$ADMIN_URL/admin/api/requests?limit=5" | jq '.requests[] | {ts, clientIdentity, endpoint, requestedModel, incomingKeepAlive, forwardedKeepAlive, responseStatus}'

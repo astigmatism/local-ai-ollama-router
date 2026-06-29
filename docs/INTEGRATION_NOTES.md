@@ -14,11 +14,13 @@ Preferred transition target when Docker DNS is available:
 OLLAMA_BASE_URL: "http://ai-router:11434"
 ```
 
-Alternative transition target:
+LAN API target:
 
 ```yaml
-OLLAMA_BASE_URL: "http://192.168.1.21:11435"
+OLLAMA_BASE_URL: "http://192.168.1.21:11434"
 ```
+
+The separate browser admin portal is `http://192.168.1.21:11435/`; do not configure clients to use the admin port.
 
 After changing environment variables, verify OpenWebUI did not keep a database-stored Ollama URL by checking router request history while sending a chat.
 
@@ -33,11 +35,13 @@ grep -R "192.168.1.21:11434\|127.0.0.1:11434\|ollama:11434" \
   /home/astigmatism/apps/local-ai-comfyui
 ```
 
-During transition, use:
+Use the Ollama-compatible router API URL:
 
 ```text
-http://192.168.1.21:11435
+http://192.168.1.21:11434
 ```
+
+The admin portal is on `11435` and is not an Ollama API endpoint.
 
 Recommended improvement: refactor the custom node to read one base URL environment variable rather than embedding raw Ollama URLs in Python source or workflow JSON.
 
