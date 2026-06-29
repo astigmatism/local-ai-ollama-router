@@ -1,0 +1,33 @@
+# Example final-state compose shape after cutover. This file is intentionally not
+# the default because the first migration phase should run the router on 11435.
+services:
+  ai-router:
+    build:
+      context: .
+    image: local-ai-ollama-router:latest
+    container_name: local-ai-ollama-router
+    restart: unless-stopped
+    ports:
+      - "${ROUTER_BIND_IP:-192.168.1.21}:11434:11434"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "11434"
+      OLLAMA_UPSTREAM_URL: "http://ollama-backend:11434"
+      ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"
+      MODEL_POLICY_MODE: "active-only"
+      FORCE_KEEP_ALIVE: "-1"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?set ADMIN_TOKEN}"
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+      - ${UNIFIED_MODELS_DIR:-/home/astigmatism/ai-models}:/models:ro
+    networks:
+      local-ai-llm-legacy_default:
+        aliases:
+          - ai-router
+          # Add this only after raw Ollama is renamed to ollama-backend or loses this alias.
+          # - ollama
+
+networks:
+  local-ai-llm-legacy_default:
+    external: true

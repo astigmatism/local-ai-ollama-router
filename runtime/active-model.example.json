@@ -1,0 +1,7 @@
+{
+  "profile": "nighttime",
+  "model": "hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser",
+  "keep_alive": -1,
+  "updated_at": "2026-06-29T00:00:00-07:00",
+  "source": "example marker; deployment should write runtime/active-model.json"
+}

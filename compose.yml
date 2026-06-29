@@ -1,0 +1,38 @@
+services:
+  ai-router:
+    build:
+      context: .
+    image: local-ai-ollama-router:latest
+    container_name: local-ai-ollama-router
+    restart: unless-stopped
+    ports:
+      - "${ROUTER_BIND_IP:-192.168.1.21}:${ROUTER_PUBLIC_PORT:-11435}:11434"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "11434"
+      OLLAMA_UPSTREAM_URL: "${OLLAMA_UPSTREAM_URL:-http://ollama:11434}"
+      OLLAMA_UPSTREAM_TIMEOUT_MS: "${OLLAMA_UPSTREAM_TIMEOUT_MS:-900000}"
+      ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"
+      ACTIVE_MODEL: "${ACTIVE_MODEL:-}"
+      MODEL_POLICY_MODE: "${MODEL_POLICY_MODE:-active-only}"
+      ALLOWED_MODELS: "${ALLOWED_MODELS:-}"
+      FORCE_KEEP_ALIVE: "${FORCE_KEEP_ALIVE:--1}"
+      USE_ACTIVE_MODEL_WHEN_MISSING: "${USE_ACTIVE_MODEL_WHEN_MISSING:-false}"
+      ALLOW_MODEL_MANAGEMENT: "${ALLOW_MODEL_MANAGEMENT:-false}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-before-lan-exposure}"
+      DATA_DIR: "/app/data"
+      PROMPT_LOGGING: "${PROMPT_LOGGING:-metadata}"
+      ENABLE_NVIDIA_SMI: "${ENABLE_NVIDIA_SMI:-false}"
+      MODELS_DIR_IN_CONTAINER: "/models"
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+      - ${UNIFIED_MODELS_DIR:-/home/astigmatism/ai-models}:/models:ro
+    networks:
+      local-ai-llm-legacy_default:
+        aliases:
+          - ai-router
+
+networks:
+  local-ai-llm-legacy_default:
+    external: true
