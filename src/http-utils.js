@@ -20,7 +20,7 @@ export async function readRequestBody(request, maxBytes) {
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.length;
-    if (total > maxBytes) {
+    if (maxBytes > 0 && total > maxBytes) {
       const error = new Error(`Request body exceeds ${maxBytes} bytes`);
       error.statusCode = 413;
       throw error;

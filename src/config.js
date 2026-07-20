@@ -68,7 +68,7 @@ export function loadConfig(env = process.env) {
     eventLogPath: path.join(dataDir, 'events.jsonl'),
     requestHistoryLimit: envInt(env, 'REQUEST_HISTORY_LIMIT', 500, 1),
     eventHistoryLimit: envInt(env, 'EVENT_HISTORY_LIMIT', 500, 1),
-    maxBodyBytes: envInt(env, 'MAX_BODY_BYTES', 25 * 1024 * 1024, 1024),
+    maxBodyBytes: envInt(env, 'MAX_BODY_BYTES', 0, 0),
     promptLogging: envString(env, 'PROMPT_LOGGING', 'metadata'),
     enableNvidiaSmi: envBool(env, 'ENABLE_NVIDIA_SMI', false),
     nvidiaSmiBin: envString(env, 'NVIDIA_SMI_BIN', 'nvidia-smi'),
@@ -104,6 +104,7 @@ export function publicConfig(config) {
     dataDir: config.dataDir,
     requestHistoryLimit: config.requestHistoryLimit,
     eventHistoryLimit: config.eventHistoryLimit,
+    maxBodyBytes: config.maxBodyBytes,
     promptLogging: config.promptLogging,
     enableNvidiaSmi: config.enableNvidiaSmi,
     modelsDirInContainer: config.modelsDirInContainer

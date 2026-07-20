@@ -26,6 +26,7 @@ services:
       FORCE_KEEP_ALIVE: "-1"
       ALLOW_MODEL_MANAGEMENT: "${ALLOW_MODEL_MANAGEMENT:-false}"
       ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-before-lan-exposure}"
+      MAX_BODY_BYTES: "${MAX_BODY_BYTES:-0}"
     volumes:
       - ./data:/app/data
       - ./runtime:/app/runtime

@@ -29,3 +29,12 @@ test('defaults admin portal to enabled on port 11435 without changing API port',
   assert.equal(config.adminBindHost, '0.0.0.0');
   assert.equal(config.adminPort, 11435);
 });
+
+test('defaults request bodies to unlimited while preserving configurable caps', () => {
+  const unlimited = loadConfig({});
+  assert.equal(unlimited.maxBodyBytes, 0);
+  assert.equal(publicConfig(unlimited).maxBodyBytes, 0);
+
+  assert.equal(loadConfig({ MAX_BODY_BYTES: '1048576' }).maxBodyBytes, 1048576);
+  assert.equal(loadConfig({ MAX_BODY_BYTES: '-1' }).maxBodyBytes, 0);
+});

@@ -103,7 +103,7 @@ The browser portal on `ADMIN_PORT` ignores this token and remains no-login by de
 | `DATA_DIR` | `/app/data` | JSONL log directory. |
 | `REQUEST_HISTORY_LIMIT` | `500` | In-memory request history count. |
 | `EVENT_HISTORY_LIMIT` | `500` | In-memory event history count. |
-| `MAX_BODY_BYTES` | `26214400` | Maximum accepted request body size. |
+| `MAX_BODY_BYTES` | `0` | Maximum accepted request body size in bytes. `0` disables the router-level cap; positive values restore it. Requests are still buffered in router memory and remain subject to client, Node.js, system-memory, Ollama, and model-context constraints. |
 | `PROMPT_LOGGING` | `metadata` | `off`, `metadata`, or `full`. Use `full` only for explicit debugging. |
 
 ## GPU/model directory visibility
