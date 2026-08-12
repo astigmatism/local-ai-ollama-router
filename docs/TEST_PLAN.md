@@ -21,6 +21,12 @@ The test suite validates:
 - unauthenticated admin listener access
 - legacy same-port admin auth behavior
 - Ollama-compatible API pass-through and keep-alive preservation/rewriting behavior
+- Responses request/message/tool translation
+- fixed active-model enforcement independent of legacy policy modes
+- non-streaming and SSE text/function-call output
+- full-history function-result correlation by `call_id`
+- stateless, malformed-input, timeout, incomplete-stream, and cancellation behavior
+- regression coverage proving existing `/api/*` and `/v1/models` behavior is unchanged
 
 ## Docker build test
 
@@ -144,6 +150,39 @@ Expected:
 - client receives streaming chunks
 - final request record includes usage fields when Ollama provides them
 - latency reflects streaming duration
+
+## Responses API integration smoke test
+
+After deploying the new endpoint, run the text and real tool-cycle smoke test:
+
+```bash
+ROUTER_URL=http://192.168.1.21:11434 \
+ADMIN_URL=http://192.168.1.21:11435 \
+./scripts/responses-smoke-test.sh
+```
+
+The script reads the active marker, snapshots `/api/ps`, streams a text response, asks the model to call the harmless `get_test_value` function, returns `router-smoke-42` as a `function_call_output`, and verifies that the final answer incorporates it. It then confirms both the active marker and loaded-model set are unchanged. It never requests a model pull or switch.
+
+Expected final lines include:
+
+```text
+Responses smoke test passed.
+Active model remained: <active-model>
+Tool result incorporated: ...router-smoke-42...
+```
+
+### Exact Codex CLI smoke test
+
+Codex CLI 0.144.3 must be tested with a function call, not only a curl text request:
+
+```bash
+ROUTER_URL=http://192.168.1.21:11434 \
+./scripts/codex-responses-smoke-test.sh
+```
+
+The script uses `--ignore-user-config --ephemeral` and temporary custom-provider command-line overrides, including `wire_api = "responses"`, `requires_openai_auth = false`, `web_search = "disabled"`, and `model_reasoning_effort = "none"`. Nonessential plugins, apps, and multi-agent tools are disabled to keep this single-function smoke deterministic. It asks Codex to use its shell function for a harmless `printf`, verifies both the completed command item and final assistant item in Codex JSONL output, and checks that the active and loaded model snapshots remain identical. It does not modify the user's persistent Codex configuration.
+
+If the script reports an unsupported `web_search` tool, verify the installed Codex version honors `web_search = "disabled"`. The adapter rejects provider-executed tools deliberately rather than silently removing them.
 
 ## Admin portal and controls
 

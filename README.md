@@ -17,6 +17,10 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
   - `POST /api/embed`
   - `POST /api/embeddings`
   - model-management routes are disabled by default and require legacy admin auth when enabled
+- Stateless OpenAI Responses compatibility for Codex CLI:
+  - `POST /v1/responses`
+  - `POST /responses` alias
+  - streamed text and function calls translated to and from Ollama `/api/chat`
 - Separate browser admin portal, normally `http://192.168.1.21:11435/` or `http://192.168.1.21:11435/admin`.
 - No token or login for the browser admin portal. It is intended for trusted local/LAN use only.
 - Active-model fail-closed policy by default.
@@ -96,6 +100,29 @@ For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/em
 
 Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters.
 
+## Codex CLI through the Responses API
+
+The Responses adapter has its own stricter model boundary. A request may omit `model` or name the exact active marker model; any other value receives HTTP 400. This rule cannot be relaxed by `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, or `REWRITE_REQUESTED_MODEL_TO_ACTIVE`. The adapter always calls only Ollama `/api/chat` with the active model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path.
+
+Codex CLI 0.144.3 can be configured with:
+
+```toml
+model_provider = "local_ollama_router"
+model = "<exact active model from /health>"
+model_reasoning_effort = "none"
+web_search = "disabled"
+
+[model_providers.local_ollama_router]
+name = "Local Ollama Router"
+base_url = "http://192.168.1.21:11434/v1"
+wire_api = "responses"
+requires_openai_auth = false
+```
+
+`web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models`; configure the active model explicitly in Codex.
+
+The endpoint is stateless: omit `store` or send `store: false`, resend prior response items for tool follow-ups, and do not send `previous_response_id`. See `docs/API.md` for supported fields, item types, curl examples, and error behavior.
+
 ## Admin portal
 
 The admin portal is served by its own listener:
@@ -135,6 +162,14 @@ Because the portal is unauthenticated by design, expose `11435` only on trusted 
 ROUTER_URL=http://192.168.1.21:11434 \
 ADMIN_URL=http://192.168.1.21:11435 \
 ./scripts/curl-smoke-test.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser'
+```
+
+Run the Responses text-and-tool-cycle smoke test without changing the active model:
+
+```bash
+ROUTER_URL=http://192.168.1.21:11434 \
+ADMIN_URL=http://192.168.1.21:11435 \
+./scripts/responses-smoke-test.sh
 ```
 
 After each request, verify raw Ollama still reports the active model as `Forever`:

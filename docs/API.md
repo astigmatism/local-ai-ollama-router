@@ -78,6 +78,112 @@ DELETE /api/delete
 
 To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must include legacy admin authorization on the router API listener when `ADMIN_TOKEN` is set.
 
+## OpenAI Responses compatibility
+
+`POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
+
+`GET /v1/models` is intentionally not implemented. Codex should be configured with the exact active model name. A conventional OpenAI model-list response is not a compatible substitute for Codex's separate model-catalog schema.
+
+### Fixed-model rules
+
+- An omitted `model` resolves to the current active-model marker.
+- The exact active model is accepted.
+- Every other model receives HTTP 400 `MODEL_NOT_ACTIVE`.
+- A missing active marker receives HTTP 503 `NO_ACTIVE_MODEL`.
+- Ollama always receives the active model and the configured `FORCE_KEEP_ALIVE` value.
+- Responses requests never invoke model pull, create, copy, push, delete, fallback, or switching logic.
+- These rules are independent of the policy settings used by existing `/api/*` routes.
+
+### Supported request fields
+
+| Field | Behavior |
+|---|---|
+| `model` | Optional; must exactly match the active model when present. |
+| `input` | Required string or array of supported input items. |
+| `instructions` | Prepended as a system message without removing developer/system input. |
+| `stream` | `false` by default; `true` produces Responses SSE events. |
+| `tools` | Function tools and function-only Codex namespace groups are translated to Ollama function definitions. |
+| `tool_choice` | `auto` and `none` only. Other forms receive HTTP 400. |
+| `parallel_tool_calls` | Boolean accepted and reflected in the response. Call IDs remain individually correlated. |
+| `reasoning.effort` | Maps supported effort names to Ollama `think`; omitted, null, or `none` disables it. |
+| `text.format` | Plain text, `json_object`, and `json_schema` formats. |
+| `store` | May be omitted or `false`; `true` and other values receive HTTP 400. |
+| `temperature` | Maps to Ollama `options.temperature`. |
+| `max_output_tokens` | Maps to Ollama `options.num_predict`. |
+
+Unknown optional fields are ignored only when doing so does not claim unsupported behavior. Any non-null `previous_response_id` is rejected because the adapter does not persist response state. WebSocket Responses transport is not implemented.
+
+Supported input items are:
+
+- `message` with `system`, `developer`, `user`, or `assistant` role
+- `input_text` and `output_text` content parts
+- `input_image` using a base64 `data:image/...` URL
+- `function_call` with a unique `call_id` and JSON-object arguments encoded as text or an object
+- `function_call_output` associated with a known, not-yet-completed `call_id`
+
+For a tool follow-up, resend the preceding function-call item, append one `function_call_output` item per `call_id` in result order, and resend the tool definitions. Unknown or duplicate call IDs and malformed function arguments are rejected.
+
+Top-level `type: "function"` tools and Codex `type: "namespace"` groups containing only functions are accepted. Namespace members are given collision-safe qualified names for Ollama, then restored to separate `namespace` and `name` fields in Responses function-call items so Codex can dispatch them locally. Built-in provider tools such as `web_search`, `file_search`, `computer_use`, and `image_generation` receive HTTP 400 even when `tool_choice` is `none`; this prevents silent loss of capabilities assumed by the client. Configure Codex with `web_search = "disabled"`.
+
+### Non-streaming example
+
+```bash
+curl -fsS http://192.168.1.21:11434/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{
+    "input": "Reply with exactly: adapter ready",
+    "store": false,
+    "stream": false,
+    "max_output_tokens": 32
+  }'
+```
+
+The result is an OpenAI Responses object containing `id`, `object: "response"`, `created_at`, `status`, the active `model`, `output`, `usage`, `error`, and `incomplete_details`. Ollama prompt/evaluation token counters map to `input_tokens`, `output_tokens`, and `total_tokens`.
+
+### Streaming example
+
+```bash
+curl -N http://192.168.1.21:11434/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{"input":"Give a five-word health check.","stream":true,"store":false}'
+```
+
+The stream uses `Content-Type: text/event-stream`, disables buffering, and emits monotonic `sequence_number` values. Its lifecycle includes `response.created`, `response.in_progress`, output-item/content-part events, text or function-argument deltas and done events, and finally `response.completed`. If generation fails after the SSE headers have been sent, the adapter emits `response.failed` and closes with `[DONE]`.
+
+### Codex configuration
+
+```toml
+model_provider = "local_ollama_router"
+model = "<exact active model>"
+model_reasoning_effort = "none"
+web_search = "disabled"
+
+[model_providers.local_ollama_router]
+name = "Local Ollama Router"
+base_url = "http://192.168.1.21:11434/v1"
+wire_api = "responses"
+requires_openai_auth = false
+```
+
+For Codex CLI 0.144.3, `/v1/models` is not required for this provider shape. `model_reasoning_effort = "none"` is recommended for deterministic local tool use; explicit supported efforts are forwarded to Ollama when reasoning is wanted. Streaming function-call `response.output_item.done` events carry the completed call that Codex executes; a later request returns the tool result as `function_call_output`.
+
+### Responses error shape
+
+Errors returned before streaming begins use the OpenAI-compatible envelope:
+
+```json
+{
+  "error": {
+    "message": "Requested model is not the active deployed model for this router profile.",
+    "type": "invalid_request_error",
+    "param": "model",
+    "code": "MODEL_NOT_ACTIVE"
+  }
+}
+```
+
+Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
+
 ## Router errors
 
 Router-generated errors use this shape:

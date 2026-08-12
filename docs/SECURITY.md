@@ -17,6 +17,8 @@ Default published ports:
 
 The Ollama-compatible API remains separate from the browser portal. Requests to `/api/*` on the admin port return a router error instead of proxying to Ollama.
 
+The API listener also exposes the stateless `/v1/responses` compatibility endpoint and `/responses` alias. These routes always target the active marker model through Ollama `/api/chat`. They reject a different requested model even if legacy `/api/*` policy is permissive, and they provide no model-management operation or arbitrary upstream path.
+
 ## Prompt logging
 
 Default prompt behavior:

@@ -81,7 +81,9 @@ async function listen(server) {
 
 async function close(server) {
   if (!server || !server.listening) return;
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const closed = new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  server.closeAllConnections?.();
+  await closed;
 }
 
 async function makeFixture(overrides = {}) {
@@ -216,6 +218,93 @@ test('API chat preserves non-model parameters and forces keep_alive to -1', asyn
     assert.equal(history.requests[0].incomingKeepAlive, '5m');
     assert.equal(history.requests[0].forwardedKeepAlive, -1);
     assert.equal(history.requests[0].keepAliveNormalized, true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Responses compatibility does not change existing model discovery, inspection, generation, or management routes', async () => {
+  const fixture = await makeFixture();
+  try {
+    const version = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/version`);
+    assert.equal(version.status, 200);
+    assert.deepEqual(await version.json(), { version: 'fake-ollama-test' });
+
+    const tags = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/tags`);
+    assert.equal(tags.status, 200);
+    assert.deepEqual(await tags.json(), {
+      models: [{ name: 'active:model', model: 'active:model' }]
+    });
+
+    const running = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/ps`);
+    assert.equal(running.status, 200);
+    assert.deepEqual(await running.json(), {
+      models: [{ name: 'active:model', model: 'active:model', until: 'Forever', context: 8192 }]
+    });
+
+    const showBody = { model: 'catalog:model', verbose: true };
+    const show = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(showBody)
+    });
+    assert.equal(show.status, 200);
+    assert.deepEqual(await show.json(), { model: 'catalog:model', details: {} });
+    const forwardedShow = fixture.upstream.requests.find((item) => item.pathname === '/api/show');
+    assert.deepEqual(forwardedShow.body, showBody);
+
+    const generate = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'active:model',
+        prompt: 'unchanged generation route',
+        stream: false,
+        keep_alive: '5m',
+        options: { temperature: 0.1 }
+      })
+    });
+    assert.equal(generate.status, 200);
+    const forwardedGenerate = fixture.upstream.requests.find((item) => item.pathname === '/api/generate');
+    assert.deepEqual(forwardedGenerate.body, {
+      model: 'active:model',
+      prompt: 'unchanged generation route',
+      stream: false,
+      keep_alive: -1,
+      options: { temperature: 0.1 }
+    });
+
+    const pull = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/pull`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'other:model' })
+    });
+    assert.equal(pull.status, 403);
+    assert.equal((await pull.json()).error.code, 'MODEL_MANAGEMENT_DISABLED');
+    assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/pull'), false);
+
+    const codexCatalog = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
+    assert.equal(codexCatalog.status, 404);
+    assert.equal((await codexCatalog.json()).error.code, 'NOT_FOUND');
+
+    const adminResponses = await fetch(`http://127.0.0.1:${fixture.adminPort}/v1/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ input: 'must not run here' })
+    });
+    assert.equal(adminResponses.status, 404);
+    assert.equal((await adminResponses.json()).error.code, 'NOT_FOUND');
+
+    assert.deepEqual(
+      fixture.upstream.requests.map((item) => `${item.method} ${item.pathname}`),
+      [
+        'GET /api/version',
+        'GET /api/tags',
+        'GET /api/ps',
+        'POST /api/show',
+        'POST /api/generate'
+      ]
+    );
   } finally {
     await fixture.cleanup();
   }

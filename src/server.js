@@ -8,6 +8,7 @@ import { readActiveModel } from './active-model.js';
 import { JsonlStore } from './fs-store.js';
 import { Metrics } from './metrics.js';
 import { evaluateProxyPolicy, isLikelyStreamingRequest, MODEL_BODY_ROUTES, routeKey } from './policy.js';
+import { handleResponsesRequest, isResponsesPath } from './responses-api.js';
 import { NdjsonUsageCollector, extractUsageFromOllamaObject } from './stream-parser.js';
 import { getGpuTelemetry } from './telemetry.js';
 import { activeModelLoadedState, checkUpstream, getOllamaPs, upstreamJson } from './upstream.js';
@@ -492,6 +493,44 @@ async function handleProxy(request, response, url, context) {
   }
 }
 
+async function handleResponses(request, response, url, context) {
+  const recordBase = {
+    ...createBaseRecord(request, url.pathname),
+    query: url.search || '',
+    startedEpochMs: Date.now()
+  };
+  const outcome = await handleResponsesRequest(request, response, url.pathname, context);
+  const record = {
+    ...recordBase,
+    ...outcome,
+    latencyMs: Date.now() - recordBase.startedEpochMs
+  };
+  await persistRequest(context.store, context.metrics, record);
+
+  if (outcome.rejected) {
+    await persistEvent(context.store, {
+      type: 'responses_request_rejected',
+      code: outcome.errorCode,
+      message: outcome.errorSummary,
+      endpoint: url.pathname,
+      requestedModel: outcome.requestedModel,
+      activeModel: outcome.activeModel,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  } else if (outcome.upstreamError) {
+    await persistEvent(context.store, {
+      type: 'responses_upstream_failed',
+      code: outcome.errorCode,
+      message: outcome.errorSummary,
+      endpoint: url.pathname,
+      model: outcome.forwardedModel,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  }
+}
+
 function sendRedirect(response, location) {
   response.writeHead(302, {
     location,
@@ -584,6 +623,11 @@ async function handleRequest(request, response, context) {
       } else {
         sendJson(response, 404, errorPayload('ADMIN_PORT_DISABLED', 'The separate admin portal listener is disabled.'));
       }
+      return;
+    }
+
+    if (isResponsesPath(pathname)) {
+      await handleResponses(request, response, url, context);
       return;
     }
 
