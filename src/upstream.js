@@ -75,6 +75,53 @@ export async function getOllamaPs(config) {
   }
 }
 
+const THINK_LEVELS = new Set(['low', 'medium', 'high', 'max']);
+
+export function isThinkingEnabled(value) {
+  return value === true || THINK_LEVELS.has(value);
+}
+
+export async function normalizeThinkForModel(config, model, body) {
+  const incomingThink = body?.think;
+  const unchanged = {
+    body,
+    incomingThink,
+    forwardedThink: incomingThink,
+    thinkNormalized: false,
+    thinkingSupported: null
+  };
+
+  if (!model || !body || typeof body !== 'object' || Array.isArray(body) || !isThinkingEnabled(incomingThink)) {
+    return unchanged;
+  }
+
+  let result;
+  try {
+    result = await upstreamJson(config, '/api/show', {
+      method: 'POST',
+      body: { model },
+      timeoutMs: Math.min(config.upstreamTimeoutMs, 10000)
+    });
+  } catch {
+    return unchanged;
+  }
+
+  if (!result.ok || !Array.isArray(result.body?.capabilities)) return unchanged;
+  if (result.body.capabilities.includes('thinking')) {
+    return { ...unchanged, thinkingSupported: true };
+  }
+
+  const normalizedBody = { ...body };
+  delete normalizedBody.think;
+  return {
+    body: normalizedBody,
+    incomingThink,
+    forwardedThink: undefined,
+    thinkNormalized: true,
+    thinkingSupported: false
+  };
+}
+
 export function activeModelLoadedState(psBody, activeModel) {
   const models = Array.isArray(psBody?.models) ? psBody.models : [];
   const match = models.find((model) => model?.name === activeModel || model?.model === activeModel);

@@ -11,7 +11,7 @@ import { evaluateProxyPolicy, isLikelyStreamingRequest, MODEL_BODY_ROUTES, route
 import { handleResponsesRequest, isResponsesPath } from './responses-api.js';
 import { NdjsonUsageCollector, extractUsageFromOllamaObject } from './stream-parser.js';
 import { getGpuTelemetry } from './telemetry.js';
-import { activeModelLoadedState, checkUpstream, getOllamaPs, upstreamJson } from './upstream.js';
+import { activeModelLoadedState, checkUpstream, getOllamaPs, normalizeThinkForModel, upstreamJson } from './upstream.js';
 import {
   copyUpstreamHeaders,
   filterRequestHeaders,
@@ -348,6 +348,15 @@ async function handleProxy(request, response, url, context) {
     isAdmin: hasAdminAuth(request, context.config)
   });
 
+  let thinkPolicy = {
+    body: policy.sanitizedBody,
+    incomingThink: policy.sanitizedBody?.think,
+    forwardedThink: policy.sanitizedBody?.think,
+    thinkNormalized: false,
+    thinkingSupported: null
+  };
+  let sanitizedBody = thinkPolicy.body;
+
   const commonRecord = {
     ...recordBase,
     activeModel: policy.activeModel,
@@ -357,7 +366,11 @@ async function handleProxy(request, response, url, context) {
     incomingKeepAlive: policy.incomingKeepAlive,
     forwardedKeepAlive: policy.forwardedKeepAlive,
     keepAliveNormalized: Boolean(policy.keepAliveNormalized),
-    streaming: isLikelyStreamingRequest(pathname, policy.sanitizedBody),
+    incomingThink: thinkPolicy.incomingThink,
+    forwardedThink: thinkPolicy.forwardedThink,
+    thinkNormalized: thinkPolicy.thinkNormalized,
+    thinkingSupported: thinkPolicy.thinkingSupported,
+    streaming: isLikelyStreamingRequest(pathname, sanitizedBody),
     bodySummary: summarizeBody(incomingBody, context.config.promptLogging)
   };
 
@@ -371,6 +384,18 @@ async function handleProxy(request, response, url, context) {
       forwardedKeepAlive: policy.forwardedKeepAlive
     });
     return;
+  }
+
+  if (['/api/chat', '/api/generate'].includes(pathname)) {
+    thinkPolicy = await normalizeThinkForModel(context.config, policy.forwardedModel, policy.sanitizedBody);
+    sanitizedBody = thinkPolicy.body;
+    Object.assign(commonRecord, {
+      incomingThink: thinkPolicy.incomingThink,
+      forwardedThink: thinkPolicy.forwardedThink,
+      thinkNormalized: thinkPolicy.thinkNormalized,
+      thinkingSupported: thinkPolicy.thinkingSupported,
+      streaming: isLikelyStreamingRequest(pathname, sanitizedBody)
+    });
   }
 
   if (policy.modelRewritten) {
@@ -401,15 +426,27 @@ async function handleProxy(request, response, url, context) {
     });
   }
 
+  if (thinkPolicy.thinkNormalized) {
+    await persistEvent(context.store, {
+      type: 'unsupported_thinking_dropped',
+      endpoint: pathname,
+      method: request.method,
+      model: policy.forwardedModel,
+      incomingThink: thinkPolicy.incomingThink,
+      clientIdentity: commonRecord.clientIdentity,
+      sourceIp: commonRecord.sourceIp
+    });
+  }
+
   const upstreamPath = `${pathname}${url.search || ''}`;
   const started = Date.now();
   let upstreamResponse;
   try {
-    const hasBody = methodAllowsBody(request.method) && policy.sanitizedBody !== null;
+    const hasBody = methodAllowsBody(request.method) && sanitizedBody !== null;
     upstreamResponse = await fetch(`${context.config.upstreamUrl}${upstreamPath}`, {
       method: request.method,
       headers: filterRequestHeaders(request.headers, hasBody ? { 'content-type': 'application/json' } : {}),
-      body: hasBody ? JSON.stringify(policy.sanitizedBody) : undefined
+      body: hasBody ? JSON.stringify(sanitizedBody) : undefined
     });
   } catch (error) {
     const status = error.name === 'AbortError' ? 504 : 502;
@@ -525,6 +562,18 @@ async function handleResponses(request, response, url, context) {
       message: outcome.errorSummary,
       endpoint: url.pathname,
       model: outcome.forwardedModel,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  }
+
+  if (outcome.thinkNormalized) {
+    await persistEvent(context.store, {
+      type: 'unsupported_thinking_dropped',
+      endpoint: url.pathname,
+      method: request.method,
+      model: outcome.forwardedModel,
+      incomingThink: outcome.incomingThink,
       clientIdentity: record.clientIdentity,
       sourceIp: record.sourceIp
     });

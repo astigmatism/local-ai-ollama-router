@@ -25,6 +25,7 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
 - No token or login for the browser admin portal. It is intended for trusted local/LAN use only.
 - Active-model fail-closed policy by default.
 - Request-level `keep_alive` normalization to `-1` for protected active-model requests.
+- Capability-aware `think` normalization that drops enabled thinking for models that do not advertise Ollama's `thinking` capability.
 - Streaming and non-streaming pass-through.
 - Persistent request log in JSONL.
 - Persistent activity/event log in JSONL.
@@ -98,7 +99,7 @@ USE_ACTIVE_MODEL_WHEN_MISSING=false
 
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters.
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters. The one capability-aware exception is an enabled `think` value (`true` or a reasoning level): before `/api/chat` or `/api/generate` is forwarded, the router checks `/api/show` and drops `think` when the model does not advertise the `thinking` capability. Explicit `false` values are preserved. If model capabilities cannot be read, the router leaves `think` unchanged rather than guessing.
 
 ## Codex CLI through the Responses API
 

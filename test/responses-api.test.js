@@ -32,7 +32,7 @@ function lastUserText(body) {
   return [...(body?.messages || [])].reverse().find((message) => message.role === 'user')?.content || '';
 }
 
-function createFakeOllama() {
+function createFakeOllama({ capabilities = ['completion'] } = {}) {
   const requests = [];
   const state = { upstreamClosed: false };
   const server = http.createServer(async (request, response) => {
@@ -42,6 +42,10 @@ function createFakeOllama() {
 
     if (request.method === 'GET' && url.pathname === '/api/tags') {
       sendJson(response, 200, { models: [{ name: 'active:model', model: 'active:model' }] });
+      return;
+    }
+    if (request.method === 'POST' && url.pathname === '/api/show') {
+      sendJson(response, 200, { model: body?.model, capabilities });
       return;
     }
     if (request.method !== 'POST' || url.pathname !== '/api/chat') {
@@ -139,8 +143,8 @@ async function close(server) {
   await closed;
 }
 
-async function makeFixture({ env = {}, configOverrides = {}, marker = true } = {}) {
-  const upstream = createFakeOllama();
+async function makeFixture({ env = {}, configOverrides = {}, marker = true, capabilities = ['completion'] } = {}) {
+  const upstream = createFakeOllama({ capabilities });
   const upstreamPort = await listen(upstream.server);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'responses-api-test-'));
   const activeModelFile = path.join(dir, 'active-model.json');
@@ -390,6 +394,46 @@ test('POST /v1/responses defaults to the active model and leaves existing model 
     assert.equal(models.status, 404);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test('Responses reasoning drops enabled think for unsupported models and preserves it for supported models', async () => {
+  const unsupported = await makeFixture();
+  try {
+    const response = await postResponses(unsupported, {
+      input: 'hello',
+      reasoning: { effort: 'high' }
+    });
+    assert.equal(response.status, 200);
+
+    const showRequest = unsupported.upstream.requests.find((item) => item.pathname === '/api/show');
+    assert.deepEqual(showRequest.body, { model: 'active:model' });
+    const chatRequest = unsupported.upstream.requests.find((item) => item.pathname === '/api/chat');
+    assert.equal(Object.hasOwn(chatRequest.body, 'think'), false);
+
+    const record = unsupported.context.store.recentRequests(1)[0];
+    assert.equal(record.incomingThink, 'high');
+    assert.equal(record.thinkNormalized, true);
+    assert.equal(record.thinkingSupported, false);
+  } finally {
+    await unsupported.cleanup();
+  }
+
+  const supported = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  try {
+    const response = await postResponses(supported, {
+      input: 'hello',
+      reasoning: { effort: 'low' }
+    });
+    assert.equal(response.status, 200);
+
+    const chatRequest = supported.upstream.requests.find((item) => item.pathname === '/api/chat');
+    assert.equal(chatRequest.body.think, 'low');
+    const record = supported.context.store.recentRequests(1)[0];
+    assert.equal(record.thinkNormalized, false);
+    assert.equal(record.thinkingSupported, true);
+  } finally {
+    await supported.cleanup();
   }
 });
 

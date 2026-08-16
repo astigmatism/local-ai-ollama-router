@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
+import { normalizeThinkForModel } from './upstream.js';
 
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'developer']);
@@ -778,6 +779,10 @@ function outcomeBase(started, pathname, body, activeModel, translated) {
     incomingKeepAlive: null,
     forwardedKeepAlive: translated ? translated.upstreamBody.keep_alive : null,
     keepAliveNormalized: Boolean(translated),
+    incomingThink: translated?.incomingThink,
+    forwardedThink: translated?.forwardedThink,
+    thinkNormalized: translated?.thinkNormalized ?? false,
+    thinkingSupported: translated?.thinkingSupported ?? null,
     streaming: translated?.stream ?? body?.stream === true,
     bodySummary: summarizeBody(body, 'metadata'),
     latencyMs: Date.now() - started
@@ -810,6 +815,16 @@ export async function handleResponsesRequest(request, response, pathname, contex
       throw new ResponsesApiError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.', null, 'server_error');
     }
     translated = translateResponsesRequest(body, activeModelInfo.model, context.config.forcedKeepAlive);
+    const thinkPolicy = await normalizeThinkForModel(
+      context.config,
+      activeModelInfo.model,
+      translated.upstreamBody
+    );
+    translated.upstreamBody = thinkPolicy.body;
+    translated.incomingThink = thinkPolicy.incomingThink;
+    translated.forwardedThink = thinkPolicy.forwardedThink;
+    translated.thinkNormalized = thinkPolicy.thinkNormalized;
+    translated.thinkingSupported = thinkPolicy.thinkingSupported;
     abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
 
     let upstreamResponse;

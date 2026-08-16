@@ -52,7 +52,8 @@ Policy-enforced. Default behavior:
 - requires `body.model`
 - rejects non-active model
 - overwrites `keep_alive` to `-1` for active model
-- preserves non-model request fields such as `messages`, `stream`, `think`, `options`, and `format`
+- preserves non-model request fields such as `messages`, `stream`, `options`, and `format`
+- preserves `think` unless it is enabled and `/api/show` reports that the model lacks the `thinking` capability; unsupported enabled values are dropped
 - streams response when `stream` is omitted or true
 - captures final usage fields when available
 
@@ -105,7 +106,7 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 | `tools` | Function tools and function-only Codex namespace groups are translated to Ollama function definitions. |
 | `tool_choice` | `auto` and `none` only. Other forms receive HTTP 400. |
 | `parallel_tool_calls` | Boolean accepted and reflected in the response. Call IDs remain individually correlated. |
-| `reasoning.effort` | Maps supported effort names to Ollama `think`; omitted, null, or `none` disables it. |
+| `reasoning.effort` | Maps supported effort names to Ollama `think`; omitted, null, or `none` disables it. An enabled value is dropped when `/api/show` reports that the active model lacks the `thinking` capability. |
 | `text.format` | Plain text, `json_object`, and `json_schema` formats. |
 | `store` | May be omitted or `false`; `true` and other values receive HTTP 400. |
 | `temperature` | Maps to Ollama `options.temperature`. |
