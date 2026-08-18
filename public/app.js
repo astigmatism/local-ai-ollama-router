@@ -171,7 +171,7 @@ function filterRequests(rows, filter) {
 
 function renderRequests(rows) {
   const table = document.querySelector('#requests-table');
-  const header = '<tr><th>Time</th><th>Client</th><th>Endpoint</th><th>Model</th><th>Keep alive</th><th>Thinking</th><th>Status</th><th>Latency</th></tr>';
+  const header = '<tr><th>Time</th><th>Client</th><th>Endpoint</th><th>Model</th><th>Thinking</th><th>Keep alive</th><th>Status</th><th>Latency</th></tr>';
   if (!rows.length) {
     table.innerHTML = header + '<tr><td colspan="8">No requests match this filter.</td></tr>';
     return;
@@ -183,8 +183,8 @@ function renderRequests(rows) {
       <td>${text(row.clientIdentity)}<br><span class="event-time">${text(row.sourceIp)}</span></td>
       <td>${text(row.method)} ${text(row.endpoint)}</td>
       <td>${text(row.modelRewritten ? `${row.requestedModel} -> ${row.forwardedModel}` : row.requestedModel)}</td>
-      <td>in: ${text(row.incomingKeepAlive)}<br>out: ${text(row.forwardedKeepAlive)}</td>
       <td>${thinkCell(row)}</td>
+      <td>in: ${text(row.incomingKeepAlive)}<br>out: ${text(row.forwardedKeepAlive)}</td>
       <td class="${statusClass}">${text(row.responseStatus || row.status)}</td>
       <td>${text(row.latencyMs)} ms</td>
     </tr>`;
