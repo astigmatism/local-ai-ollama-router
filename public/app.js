@@ -1,5 +1,32 @@
 const output = document.querySelector('#control-output');
+const requestFilter = document.querySelector('#request-filter');
 let lastSummary = null;
+let lastRequests = [];
+
+const REQUEST_FILTER_KEY = 'router-admin-request-filter';
+const PROMPT_CALLS = new Set([
+  'POST /api/chat',
+  'POST /api/generate',
+  'POST /v1/responses',
+  'POST /responses'
+]);
+const STATUS_CALLS = new Set([
+  'GET /api/tags',
+  'GET /api/version',
+  'GET /api/ps',
+  'POST /api/show'
+]);
+
+if (requestFilter) {
+  const savedFilter = localStorage.getItem(REQUEST_FILTER_KEY) || 'all';
+  if ([...requestFilter.options].some((option) => option.value === savedFilter)) {
+    requestFilter.value = savedFilter;
+  }
+  requestFilter.addEventListener('change', () => {
+    localStorage.setItem(REQUEST_FILTER_KEY, requestFilter.value);
+    renderRequests(filterRequests(lastRequests, requestFilter.value));
+  });
+}
 
 document.querySelector('#refresh').addEventListener('click', refresh);
 document.querySelector('#prewarm').addEventListener('click', () => postControl('/admin/api/prewarm', {}));
@@ -130,9 +157,25 @@ function renderIssues(summary) {
   </div>`).join('');
 }
 
+function classifyRequest(row) {
+  const key = `${row.method || 'GET'} ${row.endpoint || ''}`;
+  if (PROMPT_CALLS.has(key)) return 'prompt';
+  if (STATUS_CALLS.has(key)) return 'status';
+  return 'other';
+}
+
+function filterRequests(rows, filter) {
+  if (!filter || filter === 'all') return rows;
+  return rows.filter((row) => classifyRequest(row) === filter);
+}
+
 function renderRequests(rows) {
   const table = document.querySelector('#requests-table');
   const header = '<tr><th>Time</th><th>Client</th><th>Endpoint</th><th>Model</th><th>Keep alive</th><th>Status</th><th>Latency</th></tr>';
+  if (!rows.length) {
+    table.innerHTML = header + '<tr><td colspan="7">No requests match this filter.</td></tr>';
+    return;
+  }
   const body = rows.map((row) => {
     const statusClass = row.rejected || row.upstreamError ? 'warn' : 'good';
     return `<tr>
@@ -167,7 +210,8 @@ async function refresh() {
     renderCards(summary);
     renderPolicy(summary);
     renderIssues(summary);
-    renderRequests(requests.requests || []);
+    lastRequests = requests.requests || [];
+    renderRequests(filterRequests(lastRequests, requestFilter ? requestFilter.value : 'all'));
     renderEvents(events.events || []);
     document.querySelector('#ps').textContent = JSON.stringify(summary.ollamaPs, null, 2);
     document.querySelector('#metrics').textContent = JSON.stringify(summary.metrics, null, 2);

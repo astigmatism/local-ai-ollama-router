@@ -48,6 +48,15 @@
     <section class="grid">
       <section class="panel">
         <h2>Request history</h2>
+        <div class="table-toolbar">
+          <label for="request-filter">Show</label>
+          <select id="request-filter">
+            <option value="all">All requests</option>
+            <option value="prompt">Prompt calls only</option>
+            <option value="status">Status &amp; pings only</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
         <div class="table-wrap"><table id="requests-table"></table></div>
       </section>
       <section class="panel">

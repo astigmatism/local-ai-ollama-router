@@ -98,6 +98,8 @@ button:hover, .api-link:hover { border-color: var(--accent); }
   background: rgba(210,153,34,.08);
 }
 .table-wrap { overflow: auto; max-height: 520px; }
+.table-toolbar { display: flex; gap: .5rem; align-items: center; margin: .35rem 0 .6rem; }
+.table-toolbar select { font: inherit; padding: .3rem .5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: inherit; }
 table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 th, td { border-bottom: 1px solid var(--border); padding: .45rem .5rem; text-align: left; vertical-align: top; }
 th { color: var(--muted); position: sticky; top: 0; background: var(--panel); }
