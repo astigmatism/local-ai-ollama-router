@@ -222,10 +222,112 @@ test('request translation preserves instructions, message roles, images, JSON fo
   assert.deepEqual(translated.upstreamBody.format, { type: 'object' });
   assert.equal(translated.upstreamBody.think, 'low');
   assert.deepEqual(translated.upstreamBody.messages, [
-    { role: 'system', content: 'top-level instruction' },
-    { role: 'system', content: 'developer instruction' },
+    { role: 'system', content: 'top-level instruction\n\ndeveloper instruction' },
     { role: 'user', content: 'describe', images: ['aGVsbG8='] },
     { role: 'assistant', content: 'prior answer' }
+  ]);
+});
+
+test('request translation merges multiple system and developer messages in their relative order', () => {
+  const translated = translateResponsesRequest({
+    input: [
+      { role: 'system', content: 'system one' },
+      { role: 'developer', content: [{ type: 'input_text', text: 'developer one' }] },
+      { role: 'system', content: '' },
+      { role: 'developer', content: 'developer two' },
+      { role: 'user', content: 'hello' }
+    ]
+  }, 'active:model', -1);
+
+  assert.deepEqual(translated.upstreamBody.messages, [
+    { role: 'system', content: 'system one\n\ndeveloper one\n\ndeveloper two' },
+    { role: 'user', content: 'hello' }
+  ]);
+});
+
+test('request translation hoists interleaved system-equivalent messages without reordering history', () => {
+  const translated = translateResponsesRequest({
+    input: [
+      { role: 'user', content: 'first user' },
+      { role: 'system', content: 'late system' },
+      { role: 'assistant', content: 'prior answer' },
+      { role: 'developer', content: 'late developer' },
+      { role: 'user', content: 'second user' }
+    ]
+  }, 'active:model', -1);
+
+  assert.deepEqual(translated.upstreamBody.messages, [
+    { role: 'system', content: 'late system\n\nlate developer' },
+    { role: 'user', content: 'first user' },
+    { role: 'assistant', content: 'prior answer' },
+    { role: 'user', content: 'second user' }
+  ]);
+});
+
+test('request translation handles system-equivalent input without instructions and omits empty system messages', () => {
+  const withDeveloper = translateResponsesRequest({
+    input: [
+      { role: 'developer', content: 'developer only' },
+      { role: 'user', content: 'hello' }
+    ]
+  }, 'active:model', -1);
+  assert.deepEqual(withDeveloper.upstreamBody.messages, [
+    { role: 'system', content: 'developer only' },
+    { role: 'user', content: 'hello' }
+  ]);
+
+  const withoutSystem = translateResponsesRequest({
+    instructions: '',
+    input: [
+      { role: 'system', content: '' },
+      { role: 'developer', content: [] },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' }
+    ]
+  }, 'active:model', -1);
+  assert.deepEqual(withoutSystem.upstreamBody.messages, [
+    { role: 'user', content: 'hello' },
+    { role: 'assistant', content: 'hi' }
+  ]);
+
+  const stringInput = translateResponsesRequest({ input: 'hello' }, 'active:model', -1);
+  assert.deepEqual(stringInput.upstreamBody.messages, [{ role: 'user', content: 'hello' }]);
+});
+
+test('hoisted system-equivalent messages preserve function-call grouping boundaries', () => {
+  const translated = translateResponsesRequest({
+    input: [
+      { type: 'function_call', call_id: 'call_a', name: 'lookup', arguments: '{"key":"a"}' },
+      { role: 'developer', content: 'developer boundary' },
+      { type: 'function_call', call_id: 'call_b', name: 'lookup', arguments: '{"key":"b"}' },
+      { role: 'system', content: 'system boundary' },
+      { type: 'function_call', call_id: 'call_c', name: 'lookup', arguments: '{"key":"c"}' },
+      { type: 'function_call_output', call_id: 'call_a', output: 'first' },
+      { type: 'function_call_output', call_id: 'call_b', output: 'second' },
+      { type: 'function_call_output', call_id: 'call_c', output: 'third' }
+    ]
+  }, 'active:model', -1);
+
+  assert.deepEqual(translated.upstreamBody.messages, [
+    { role: 'system', content: 'developer boundary\n\nsystem boundary' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_a', type: 'function', function: { name: 'lookup', arguments: { key: 'a' } } }]
+    },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_b', type: 'function', function: { name: 'lookup', arguments: { key: 'b' } } }]
+    },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{ id: 'call_c', type: 'function', function: { name: 'lookup', arguments: { key: 'c' } } }]
+    },
+    { role: 'tool', tool_name: 'lookup', tool_call_id: 'call_a', content: 'first' },
+    { role: 'tool', tool_name: 'lookup', tool_call_id: 'call_b', content: 'second' },
+    { role: 'tool', tool_name: 'lookup', tool_call_id: 'call_c', content: 'third' }
   ]);
 });
 

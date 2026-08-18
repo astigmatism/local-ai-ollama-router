@@ -116,6 +116,7 @@ function parseFunctionArguments(value, param) {
 
 function translateInput(input, instructions, toolNames) {
   const messages = [];
+  const systemParts = [];
   const knownCalls = new Map();
   const completedCalls = new Set();
   let pendingToolCalls = [];
@@ -126,14 +127,19 @@ function translateInput(input, instructions, toolNames) {
     pendingToolCalls = [];
   };
 
+  const finishMessages = () => {
+    if (systemParts.length) messages.unshift({ role: 'system', content: systemParts.join('\n\n') });
+    return messages;
+  };
+
   if (instructions !== undefined && instructions !== null) {
     if (typeof instructions !== 'string') invalid('INVALID_INSTRUCTIONS', 'instructions must be a string.', 'instructions');
-    if (instructions) messages.push({ role: 'system', content: instructions });
+    if (instructions) systemParts.push(instructions);
   }
 
   if (typeof input === 'string') {
     messages.push({ role: 'user', content: input });
-    return messages;
+    return finishMessages();
   }
   if (!Array.isArray(input)) invalid('INVALID_INPUT', 'input must be a string or an array of input items.', 'input');
 
@@ -147,8 +153,12 @@ function translateInput(input, instructions, toolNames) {
       flushToolCalls();
       if (!MESSAGE_ROLES.has(item.role)) invalid('INVALID_INPUT_ROLE', `Unsupported message role: ${String(item.role)}.`, `${param}.role`);
       const translated = translateMessageContent(item.content, item.role, `${param}.content`);
+      if (item.role === 'system' || item.role === 'developer') {
+        if (translated.content) systemParts.push(translated.content);
+        continue;
+      }
       messages.push({
-        role: item.role === 'developer' ? 'system' : item.role,
+        role: item.role,
         content: translated.content,
         ...(translated.images.length ? { images: translated.images } : {})
       });
@@ -199,7 +209,7 @@ function translateInput(input, instructions, toolNames) {
   }
 
   flushToolCalls();
-  return messages;
+  return finishMessages();
 }
 
 function translateTools(tools, toolChoice) {
