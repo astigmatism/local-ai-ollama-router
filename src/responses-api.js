@@ -6,6 +6,7 @@ import { normalizeThinkForModel } from './upstream.js';
 import {
   OLLAMA_THINK_LEVELS,
   RESPONSES_REASONING_EFFORTS,
+  thinkLevelToReasoningEffort,
   reasoningEffortToThink,
   resolveDefaultThink
 } from './reasoning.js';
@@ -361,6 +362,7 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
   if (body.max_output_tokens !== undefined && body.max_output_tokens !== null) options.num_predict = body.max_output_tokens;
   const format = translateTextFormat(body.text);
   const think = translateReasoning(body.reasoning, body.reasoning_effort, defaultThink);
+  const translatedReasoningEffort = thinkLevelToReasoningEffort(think);
 
   const upstreamBody = {
     model: activeModel,
@@ -375,6 +377,7 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
 
   return {
     upstreamBody,
+    reasoningEffort: translatedReasoningEffort,
     requestedModel: body.model ?? null,
     stream: body.stream === true,
     toolChoice: translatedTools.toolChoice,
@@ -815,6 +818,7 @@ function outcomeBase(started, pathname, body, activeModel, translated) {
     forwardedThink: translated?.forwardedThink,
     thinkNormalized: translated?.thinkNormalized ?? false,
     thinkingSupported: translated?.thinkingSupported ?? null,
+    reasoningEffort: translated?.reasoningEffort ?? null,
     streaming: translated?.stream ?? body?.stream === true,
     bodySummary: summarizeBody(body, 'metadata'),
     latencyMs: Date.now() - started

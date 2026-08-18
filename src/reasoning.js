@@ -22,6 +22,17 @@ export function reasoningEffortToThink(effort) {
   return effort;
 }
 
+export function thinkLevelToReasoningEffort(value) {
+  if (value === true) return 'high';
+  if (value === false) return 'none';
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'minimal') return 'minimal';
+  if (normalized === 'xhigh') return 'xhigh';
+  if (OLLAMA_THINK_LEVELS.has(normalized)) return normalized;
+  return undefined;
+}
+
 export function parseDefaultThink(value, { allowModelDefault = true } = {}) {
   if (typeof value === 'boolean') return value;
   if (typeof value !== 'string') {

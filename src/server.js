@@ -12,7 +12,7 @@ import { handleResponsesRequest, isResponsesPath } from './responses-api.js';
 import { NdjsonUsageCollector, extractUsageFromOllamaObject } from './stream-parser.js';
 import { getGpuTelemetry } from './telemetry.js';
 import { activeModelLoadedState, checkUpstream, getOllamaPs, normalizeThinkForModel, upstreamJson } from './upstream.js';
-import { resolveDefaultThink } from './reasoning.js';
+import { resolveDefaultThink, thinkLevelToReasoningEffort } from './reasoning.js';
 import {
   copyUpstreamHeaders,
   filterRequestHeaders,
@@ -371,6 +371,7 @@ async function handleProxy(request, response, url, context) {
     forwardedThink: thinkPolicy.forwardedThink,
     thinkNormalized: thinkPolicy.thinkNormalized,
     thinkingSupported: thinkPolicy.thinkingSupported,
+    reasoningEffort: thinkLevelToReasoningEffort(thinkPolicy.forwardedThink ?? thinkPolicy.incomingThink),
     streaming: isLikelyStreamingRequest(pathname, sanitizedBody),
     bodySummary: summarizeBody(incomingBody, context.config.promptLogging)
   };
@@ -414,6 +415,7 @@ async function handleProxy(request, response, url, context) {
       forwardedThink: thinkPolicy.forwardedThink,
       thinkNormalized: thinkPolicy.thinkNormalized,
       thinkingSupported: thinkPolicy.thinkingSupported,
+      reasoningEffort: thinkLevelToReasoningEffort(thinkPolicy.forwardedThink ?? thinkPolicy.incomingThink),
       streaming: isLikelyStreamingRequest(pathname, sanitizedBody)
     });
   }

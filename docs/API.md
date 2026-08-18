@@ -130,6 +130,8 @@ Allowed configured defaults are `true`, `false`/`none`, `minimal`, `low`, `mediu
 
 Ollama's `thinking` capability is binary metadata; it does not enumerate whether a particular model supports booleans, levels, or disabling. The router therefore preserves valid explicit controls rather than hard-coding model names. Profile owners should set model-appropriate defaults—for example, a level for GPT-OSS, whose Ollama implementation ignores boolean controls.
 
+Request records log the incoming and forwarded `think` values, whether the control was dropped for an unsupported model, and the effective `reasoningEffort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). The admin portal request history displays these in a Thinking column.
+
 Supported input items are:
 
 - `message` with `system`, `developer`, `user`, or `assistant` role

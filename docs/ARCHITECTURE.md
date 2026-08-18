@@ -97,6 +97,7 @@ Fields include:
 - requested model
 - active model at request time
 - incoming and forwarded `keep_alive`
+- incoming and forwarded `think`, whether the control was dropped, and the effective reasoning effort
 - allow/reject state
 - upstream response status
 - latency

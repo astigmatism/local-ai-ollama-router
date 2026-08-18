@@ -550,6 +550,7 @@ test('Responses reasoning drops enabled think for unsupported models and preserv
     assert.equal(record.incomingThink, 'high');
     assert.equal(record.thinkNormalized, true);
     assert.equal(record.thinkingSupported, false);
+    assert.equal(record.reasoningEffort, 'high');
   } finally {
     await unsupported.cleanup();
   }
@@ -567,6 +568,7 @@ test('Responses reasoning drops enabled think for unsupported models and preserv
     const record = supported.context.store.recentRequests(1)[0];
     assert.equal(record.thinkNormalized, false);
     assert.equal(record.thinkingSupported, true);
+    assert.equal(record.reasoningEffort, 'low');
   } finally {
     await supported.cleanup();
   }

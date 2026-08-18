@@ -251,6 +251,7 @@ test('API chat drops enabled think for unsupported models and preserves it for s
     assert.equal(record.incomingThink, true);
     assert.equal(record.thinkNormalized, true);
     assert.equal(record.thinkingSupported, false);
+    assert.equal(record.reasoningEffort, 'high');
   } finally {
     await unsupported.cleanup();
   }
@@ -274,6 +275,8 @@ test('API chat drops enabled think for unsupported models and preserves it for s
     const record = supported.context.store.recentRequests(1)[0];
     assert.equal(record.thinkNormalized, false);
     assert.equal(record.thinkingSupported, true);
+    assert.equal(record.forwardedThink, true);
+    assert.equal(record.reasoningEffort, 'high');
   } finally {
     await supported.cleanup();
   }

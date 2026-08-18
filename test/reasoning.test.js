@@ -4,8 +4,22 @@ import {
   isThinkingEnabled,
   parseDefaultThink,
   reasoningEffortToThink,
-  resolveDefaultThink
+  resolveDefaultThink,
+  thinkLevelToReasoningEffort
 } from '../src/reasoning.js';
+
+test('maps Ollama think values back to generic reasoning efforts', () => {
+  assert.equal(thinkLevelToReasoningEffort(true), 'high');
+  assert.equal(thinkLevelToReasoningEffort(false), 'none');
+  assert.equal(thinkLevelToReasoningEffort('low'), 'low');
+  assert.equal(thinkLevelToReasoningEffort('medium'), 'medium');
+  assert.equal(thinkLevelToReasoningEffort('high'), 'high');
+  assert.equal(thinkLevelToReasoningEffort('max'), 'max');
+  assert.equal(thinkLevelToReasoningEffort('minimal'), 'minimal');
+  assert.equal(thinkLevelToReasoningEffort('xhigh'), 'xhigh');
+  assert.equal(thinkLevelToReasoningEffort(undefined), undefined);
+  assert.equal(thinkLevelToReasoningEffort('invalid'), undefined);
+});
 
 test('maps generic reasoning efforts to Ollama think values', () => {
   assert.equal(reasoningEffortToThink('none'), false);
