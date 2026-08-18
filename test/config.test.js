@@ -55,3 +55,13 @@ test('parses optional cross-protocol thinking defaults without changing endpoint
   assert.equal(modelDefault.defaultThink, undefined);
   assert.throws(() => loadConfig({ DEFAULT_THINK: 'turbo' }), /thinking default/);
 });
+
+test('disables Responses context shifting by default with an explicit opt-in', () => {
+  const defaultConfig = loadConfig({});
+  assert.equal(defaultConfig.responsesContextShift, false);
+  assert.equal(publicConfig(defaultConfig).responsesContextShift, false);
+
+  const enabled = loadConfig({ RESPONSES_CONTEXT_SHIFT: 'true' });
+  assert.equal(enabled.responsesContextShift, true);
+  assert.equal(publicConfig(enabled).responsesContextShift, true);
+});

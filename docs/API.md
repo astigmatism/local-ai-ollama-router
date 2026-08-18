@@ -93,7 +93,7 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 - The exact active model is accepted.
 - Every other model receives HTTP 400 `MODEL_NOT_ACTIVE`.
 - A missing active marker receives HTTP 503 `NO_ACTIVE_MODEL`.
-- Ollama always receives the active model and the configured `FORCE_KEEP_ALIVE` value.
+- Ollama always receives the active model, the configured `FORCE_KEEP_ALIVE` value, and `shift: false` by default. `RESPONSES_CONTEXT_SHIFT=true` is an explicit opt-in to the old shifting behavior.
 - Responses requests never invoke model pull, create, copy, push, delete, fallback, or switching logic.
 - These rules are independent of the policy settings used by existing `/api/*` routes.
 
@@ -137,10 +137,15 @@ Supported input items are:
 - `message` with `system`, `developer`, `user`, or `assistant` role
 - `input_text` and `output_text` content parts
 - `input_image` using a base64 `data:image/...` URL
+- `reasoning` with `summary` (`summary_text` parts), raw `content` (`reasoning_text` parts), or both; raw content takes precedence when both are present
 - `function_call` with a unique `call_id` and JSON-object arguments encoded as text or an object
 - `function_call_output` associated with a known, not-yet-completed `call_id`
 
 For a tool follow-up, resend the preceding function-call item, append one `function_call_output` item per `call_id` in result order, and resend the tool definitions. Unknown or duplicate call IDs and malformed function arguments are rejected.
+
+Ollama assistant `message.thinking` is returned as a Responses `reasoning` item with an `rs_...` ID, an empty `summary`, and raw `reasoning_text` content. Streaming emits `response.output_item.added`, `response.reasoning_text.delta`, `response.reasoning_text.done`, and `response.output_item.done` before any following assistant message or function call. The adapter does not synthesize a reasoning summary.
+
+Current Ollama chat responses expose aggregate `eval_count` but no exact reasoning-token breakdown. When thinking is present, completed Responses payloads therefore use `usage: null` instead of falsely reporting `reasoning_tokens: 0` or estimating a count. Responses without thinking retain the existing usage mapping.
 
 Top-level `type: "function"` tools and Codex `type: "namespace"` groups containing only functions are accepted. Namespace members are given collision-safe qualified names for Ollama, then restored to separate `namespace` and `name` fields in Responses function-call items so Codex can dispatch them locally. Built-in provider tools such as `web_search`, `file_search`, `computer_use`, and `image_generation` receive HTTP 400 even when `tool_choice` is `none`; this prevents silent loss of capabilities assumed by the client. Configure Codex with `web_search = "disabled"`.
 

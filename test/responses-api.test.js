@@ -55,6 +55,21 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
 
     const prompt = lastUserText(body);
     if (!body.stream) {
+      if (prompt === 'thinking-tool') {
+        sendJson(response, 200, {
+          model: body.model,
+          message: {
+            role: 'assistant',
+            thinking: 'I should call the weather tool.',
+            content: '',
+            tool_calls: [{ id: 'call_weather_thinking', function: { name: 'get_weather', arguments: { city: 'Portland' } } }]
+          },
+          done: true,
+          prompt_eval_count: 14,
+          eval_count: 9
+        });
+        return;
+      }
       if (prompt === 'tool') {
         sendJson(response, 200, {
           model: body.model,
@@ -114,6 +129,35 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
         done: false
       })}\n`);
       response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, prompt_eval_count: 5, eval_count: 2 })}\n`);
+      return;
+    }
+    if (prompt === 'stream-thinking-tool') {
+      response.write(`${JSON.stringify({
+        model: body.model,
+        message: { role: 'assistant', thinking: 'I should ', content: '' },
+        done: false
+      })}\n`);
+      response.write(`${JSON.stringify({
+        model: body.model,
+        message: { role: 'assistant', thinking: 'read the value.', content: '' },
+        done: false
+      })}\n`);
+      response.write(`${JSON.stringify({
+        model: body.model,
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call_stream_thinking', function: { name: 'read_value', arguments: { key: 'answer' } } }]
+        },
+        done: false
+      })}\n`);
+      response.end(`${JSON.stringify({
+        model: body.model,
+        message: { role: 'assistant', content: '' },
+        done: true,
+        prompt_eval_count: 6,
+        eval_count: 5
+      })}\n`);
       return;
     }
     if (prompt === 'slow') {
@@ -218,6 +262,7 @@ test('request translation preserves instructions, message roles, images, JSON fo
 
   assert.equal(translated.upstreamBody.model, 'active:model');
   assert.equal(translated.upstreamBody.keep_alive, -1);
+  assert.equal(translated.upstreamBody.shift, false);
   assert.deepEqual(translated.upstreamBody.options, { temperature: 0.25, num_predict: 123 });
   assert.deepEqual(translated.upstreamBody.format, { type: 'object' });
   assert.equal(translated.upstreamBody.think, 'low');
@@ -358,6 +403,95 @@ test('request translation composes nested and top-level reasoning efforts with c
     }, 'active:model', -1),
     (error) => error.code === 'CONFLICTING_REASONING_EFFORT'
   );
+});
+
+test('request translation preserves Codex reasoning summary-only, content-only, and combined items', () => {
+  const cases = [
+    [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'summary thought' }] },
+      'summary thought'
+    ],
+    [
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'raw thought' }] },
+      'raw thought'
+    ],
+    [
+      {
+        type: 'reasoning',
+        summary: [{ type: 'summary_text', text: 'summary must not replace raw thinking' }],
+        content: [{ type: 'reasoning_text', text: 'preserved raw thought' }],
+        encrypted_content: null
+      },
+      'preserved raw thought'
+    ]
+  ];
+
+  for (const [reasoningItem, expectedThinking] of cases) {
+    const translated = translateResponsesRequest({
+      input: [
+        { role: 'user', content: 'use a tool' },
+        reasoningItem,
+        { type: 'function_call', call_id: 'call_reasoning', name: 'lookup', arguments: '{"key":"x"}' },
+        { type: 'function_call_output', call_id: 'call_reasoning', output: 'result' }
+      ]
+    }, 'active:model', -1);
+
+    assert.deepEqual(translated.upstreamBody.messages, [
+      { role: 'user', content: 'use a tool' },
+      {
+        role: 'assistant',
+        content: '',
+        thinking: expectedThinking,
+        tool_calls: [{
+          id: 'call_reasoning',
+          type: 'function',
+          function: { name: 'lookup', arguments: { key: 'x' } }
+        }]
+      },
+      { role: 'tool', tool_name: 'lookup', tool_call_id: 'call_reasoning', content: 'result' }
+    ]);
+  }
+});
+
+test('request translation merges reasoning with prior assistant text and accepts encrypted-only history', () => {
+  const withText = translateResponsesRequest({
+    input: [
+      { type: 'reasoning', content: [{ type: 'text', text: 'legacy raw thought' }] },
+      { role: 'assistant', content: [{ type: 'output_text', text: 'visible answer' }] },
+      { role: 'user', content: 'continue' }
+    ]
+  }, 'active:model', -1);
+  assert.deepEqual(withText.upstreamBody.messages, [
+    { role: 'assistant', content: 'visible answer', thinking: 'legacy raw thought' },
+    { role: 'user', content: 'continue' }
+  ]);
+
+  const encryptedOnly = translateResponsesRequest({
+    input: [
+      { type: 'reasoning', summary: [], content: [], encrypted_content: 'opaque-ciphertext' },
+      { type: 'function_call', call_id: 'call_encrypted', name: 'lookup', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_encrypted', output: 'ok' }
+    ]
+  }, 'active:model', -1);
+  assert.equal(Object.hasOwn(encryptedOnly.upstreamBody.messages[0], 'thinking'), false);
+  assert.equal(encryptedOnly.upstreamBody.messages[0].tool_calls[0].id, 'call_encrypted');
+});
+
+test('malformed reasoning items return INVALID_REASONING_ITEM', () => {
+  const malformedItems = [
+    { type: 'reasoning' },
+    { type: 'reasoning', summary: 'not-an-array' },
+    { type: 'reasoning', summary: [{ type: 'text', text: 'wrong type' }] },
+    { type: 'reasoning', content: [{ type: 'reasoning_text', text: 42 }] },
+    { type: 'reasoning', summary: [], content: [], encrypted_content: null },
+    { type: 'reasoning', encrypted_content: '' }
+  ];
+  for (const reasoningItem of malformedItems) {
+    assert.throws(
+      () => translateResponsesRequest({ input: [reasoningItem] }, 'active:model', -1),
+      (error) => error instanceof ResponsesApiError && error.code === 'INVALID_REASONING_ITEM'
+    );
+  }
 });
 
 test('request translation reconstructs multiple function calls and ordered outputs by call_id', () => {
@@ -505,6 +639,32 @@ test('non-stream response translation emits text, function calls, stable IDs, an
   });
 });
 
+test('non-stream response emits raw thinking before assistant text and tool calls without fabricated usage', () => {
+  const translated = translateOllamaResponse({
+    message: {
+      role: 'assistant',
+      thinking: 'careful raw reasoning',
+      content: 'tool preface',
+      tool_calls: [{ id: 'call_thinking', function: { name: 'lookup', arguments: { q: 'x' } } }]
+    },
+    prompt_eval_count: 13,
+    eval_count: 8
+  }, { input: 'x' }, 'active:model', 'resp_thinking', 42);
+
+  assert.deepEqual(translated.output.map((item) => item.type), ['reasoning', 'message', 'function_call']);
+  assert.match(translated.output[0].id, /^rs_[a-f0-9]{32}$/);
+  assert.deepEqual(translated.output[0], {
+    id: translated.output[0].id,
+    type: 'reasoning',
+    status: 'completed',
+    summary: [],
+    content: [{ type: 'reasoning_text', text: 'careful raw reasoning' }]
+  });
+  assert.equal(translated.output[1].content[0].text, 'tool preface');
+  assert.equal(translated.output[2].call_id, 'call_thinking');
+  assert.equal(translated.usage, null);
+});
+
 test('POST /v1/responses defaults to the active model and leaves existing model endpoints unchanged', async () => {
   const fixture = await makeFixture({ env: { MODEL_POLICY_MODE: 'permissive', REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' } });
   try {
@@ -518,6 +678,7 @@ test('POST /v1/responses defaults to the active model and leaves existing model 
     const upstreamChat = fixture.upstream.requests.find((item) => item.pathname === '/api/chat');
     assert.equal(upstreamChat.body.model, 'active:model');
     assert.equal(upstreamChat.body.keep_alive, -1);
+    assert.equal(upstreamChat.body.shift, false);
     assert.equal(upstreamChat.body.think, false);
 
     const tags = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/tags`);
@@ -640,6 +801,23 @@ test('stateless contract rejects store=true and previous_response_id before Olla
   }
 });
 
+test('malformed reasoning history returns a Responses validation error before Ollama', async () => {
+  const fixture = await makeFixture();
+  try {
+    const response = await postResponses(fixture, {
+      input: [{ type: 'reasoning', content: [{ type: 'reasoning_text', text: 42 }] }]
+    });
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.error.type, 'invalid_request_error');
+    assert.equal(payload.error.code, 'INVALID_REASONING_ITEM');
+    assert.equal(payload.error.param, 'input[0].content[0].text');
+    assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/chat'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('missing active marker fails closed and maintenance mode rejects Responses generation', async () => {
   const missing = await makeFixture({ marker: false });
   try {
@@ -698,6 +876,62 @@ test('function tool request and tool output follow-up preserve definitions and c
   }
 });
 
+test('reasoning plus a tool call is returned and preserved with the tool result on the next request', async () => {
+  const fixture = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  const tool = { type: 'function', name: 'get_weather', parameters: { type: 'object' } };
+  try {
+    const first = await postResponses(fixture, {
+      input: 'thinking-tool',
+      reasoning: { effort: 'high' },
+      tools: [tool]
+    });
+    assert.equal(first.status, 200);
+    const firstPayload = await first.json();
+    assert.deepEqual(firstPayload.output.map((item) => item.type), ['reasoning', 'function_call']);
+    const reasoning = firstPayload.output[0];
+    const call = firstPayload.output[1];
+    assert.equal(reasoning.content[0].text, 'I should call the weather tool.');
+    assert.equal(reasoning.summary.length, 0);
+    assert.match(reasoning.id, /^rs_[a-f0-9]{32}$/);
+    assert.equal(call.call_id, 'call_weather_thinking');
+    assert.equal(firstPayload.usage, null);
+
+    const second = await postResponses(fixture, {
+      input: [
+        { role: 'user', content: 'thinking-tool' },
+        reasoning,
+        call,
+        { type: 'function_call_output', call_id: call.call_id, output: 'rain' }
+      ],
+      tools: [tool]
+    });
+    assert.equal(second.status, 200);
+
+    const secondUpstream = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat')[1].body;
+    assert.deepEqual(secondUpstream.messages, [
+      { role: 'user', content: 'thinking-tool' },
+      {
+        role: 'assistant',
+        content: '',
+        thinking: 'I should call the weather tool.',
+        tool_calls: [{
+          id: 'call_weather_thinking',
+          type: 'function',
+          function: { name: 'get_weather', arguments: { city: 'Portland' } }
+        }]
+      },
+      {
+        role: 'tool',
+        tool_name: 'get_weather',
+        tool_call_id: 'call_weather_thinking',
+        content: 'rain'
+      }
+    ]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('streaming text emits a coherent monotonic SSE lifecycle and completed usage', async () => {
   const fixture = await makeFixture();
   try {
@@ -741,6 +975,53 @@ test('streaming function calls emit argument delta/done and matching output item
     assert.equal(itemDone.item.id, added.item.id);
     assert.equal(done.arguments, '{"key":"answer"}');
     assert.equal(events.at(-1).response.output[0].call_id, 'call_stream_1');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('streaming thinking emits a complete reasoning item before the following tool call', async () => {
+  const fixture = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  try {
+    const response = await postResponses(fixture, {
+      input: 'stream-thinking-tool',
+      stream: true,
+      reasoning: { effort: 'medium' },
+      tools: [{ type: 'function', name: 'read_value', parameters: { type: 'object' } }]
+    });
+    assert.equal(response.status, 200);
+    const events = parseSse(await response.text());
+    const reasoningAddedIndex = events.findIndex(
+      (event) => event.type === 'response.output_item.added' && event.item.type === 'reasoning'
+    );
+    const reasoningDoneIndex = events.findIndex((event) => event.type === 'response.reasoning_text.done');
+    const reasoningItemDoneIndex = events.findIndex(
+      (event) => event.type === 'response.output_item.done' && event.item.type === 'reasoning'
+    );
+    const toolAddedIndex = events.findIndex(
+      (event) => event.type === 'response.output_item.added' && event.item.type === 'function_call'
+    );
+    assert.ok(reasoningAddedIndex >= 0);
+    assert.ok(reasoningDoneIndex > reasoningAddedIndex);
+    assert.ok(reasoningItemDoneIndex > reasoningDoneIndex);
+    assert.ok(toolAddedIndex > reasoningItemDoneIndex);
+
+    const reasoningAdded = events[reasoningAddedIndex];
+    assert.match(reasoningAdded.item.id, /^rs_[a-f0-9]{32}$/);
+    assert.deepEqual(
+      events.filter((event) => event.type === 'response.reasoning_text.delta').map((event) => event.delta),
+      ['I should ', 'read the value.']
+    );
+    assert.equal(events[reasoningDoneIndex].item_id, reasoningAdded.item.id);
+    assert.equal(events[reasoningDoneIndex].text, 'I should read the value.');
+    assert.equal(events[reasoningItemDoneIndex].item.id, reasoningAdded.item.id);
+
+    const completed = events.at(-1);
+    assert.equal(completed.type, 'response.completed');
+    assert.deepEqual(completed.response.output.map((item) => item.type), ['reasoning', 'function_call']);
+    assert.equal(completed.response.output[0].content[0].text, 'I should read the value.');
+    assert.equal(completed.response.output[1].call_id, 'call_stream_thinking');
+    assert.equal(completed.response.usage, null);
   } finally {
     await fixture.cleanup();
   }

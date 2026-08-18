@@ -115,17 +115,90 @@ function parseFunctionArguments(value, param) {
   return parsed;
 }
 
+function translateReasoningParts(parts, expectedType, param, separator) {
+  if (parts === undefined) return { present: false, text: '' };
+  if (!Array.isArray(parts)) invalid('INVALID_REASONING_ITEM', `${param} must be an array.`, param);
+
+  const texts = parts.map((part, index) => {
+    const partParam = `${param}[${index}]`;
+    if (!isPlainObject(part) || part.type !== expectedType) {
+      invalid('INVALID_REASONING_ITEM', `${partParam}.type must be ${expectedType}.`, `${partParam}.type`);
+    }
+    if (typeof part.text !== 'string') {
+      invalid('INVALID_REASONING_ITEM', `${partParam}.text must be a string.`, `${partParam}.text`);
+    }
+    return part.text;
+  });
+  return { present: true, text: texts.join(separator) };
+}
+
+function translateReasoningItem(item, param) {
+  const summary = translateReasoningParts(item.summary, 'summary_text', `${param}.summary`, '\n\n');
+  let content = { present: false, text: '' };
+  if (item.content !== undefined) {
+    if (!Array.isArray(item.content)) {
+      invalid('INVALID_REASONING_ITEM', `${param}.content must be an array.`, `${param}.content`);
+    }
+    const texts = item.content.map((part, index) => {
+      const partParam = `${param}.content[${index}]`;
+      if (!isPlainObject(part) || !['reasoning_text', 'text'].includes(part.type)) {
+        invalid('INVALID_REASONING_ITEM', `${partParam}.type must be reasoning_text.`, `${partParam}.type`);
+      }
+      if (typeof part.text !== 'string') {
+        invalid('INVALID_REASONING_ITEM', `${partParam}.text must be a string.`, `${partParam}.text`);
+      }
+      return part.text;
+    });
+    content = { present: true, text: texts.join('') };
+  }
+
+  const hasEncryptedContent = item.encrypted_content !== undefined && item.encrypted_content !== null;
+  if (hasEncryptedContent && (typeof item.encrypted_content !== 'string' || !item.encrypted_content)) {
+    invalid(
+      'INVALID_REASONING_ITEM',
+      `${param}.encrypted_content must be a non-empty string or null.`,
+      `${param}.encrypted_content`
+    );
+  }
+  if (!summary.present && !content.present && !hasEncryptedContent) {
+    invalid(
+      'INVALID_REASONING_ITEM',
+      'reasoning items require summary, content, or encrypted_content.',
+      param
+    );
+  }
+
+  const thinking = content.text || summary.text;
+  if (!thinking && !hasEncryptedContent) {
+    invalid('INVALID_REASONING_ITEM', 'reasoning items must contain reasoning text.', param);
+  }
+  // Ollama cannot consume OpenAI-encrypted reasoning. Accept encrypted-only items
+  // without rejecting otherwise valid stateless history; plaintext content or a
+  // supplied summary is preserved in the prior assistant message when available.
+  return thinking || null;
+}
+
 function translateInput(input, instructions, toolNames) {
   const messages = [];
   const systemParts = [];
   const knownCalls = new Map();
   const completedCalls = new Set();
-  let pendingToolCalls = [];
+  let pendingAssistant = null;
 
-  const flushToolCalls = () => {
-    if (!pendingToolCalls.length) return;
-    messages.push({ role: 'assistant', content: '', tool_calls: pendingToolCalls });
-    pendingToolCalls = [];
+  const ensurePendingAssistant = () => {
+    if (!pendingAssistant) {
+      pendingAssistant = {
+        message: { role: 'assistant', content: '' },
+        hasMessageItem: false
+      };
+    }
+    return pendingAssistant;
+  };
+
+  const flushAssistant = () => {
+    if (!pendingAssistant) return;
+    messages.push(pendingAssistant.message);
+    pendingAssistant = null;
   };
 
   const finishMessages = () => {
@@ -151,18 +224,34 @@ function translateInput(input, instructions, toolNames) {
 
     const itemType = item.type || (typeof item.role === 'string' ? 'message' : null);
     if (itemType === 'message') {
-      flushToolCalls();
       if (!MESSAGE_ROLES.has(item.role)) invalid('INVALID_INPUT_ROLE', `Unsupported message role: ${String(item.role)}.`, `${param}.role`);
       const translated = translateMessageContent(item.content, item.role, `${param}.content`);
       if (item.role === 'system' || item.role === 'developer') {
+        flushAssistant();
         if (translated.content) systemParts.push(translated.content);
         continue;
       }
+      if (item.role === 'assistant') {
+        if (pendingAssistant?.hasMessageItem || pendingAssistant?.message.tool_calls?.length) flushAssistant();
+        const pending = ensurePendingAssistant();
+        pending.message.content = translated.content;
+        if (translated.images.length) pending.message.images = translated.images;
+        pending.hasMessageItem = true;
+        continue;
+      }
+      flushAssistant();
       messages.push({
         role: item.role,
         content: translated.content,
         ...(translated.images.length ? { images: translated.images } : {})
       });
+      continue;
+    }
+
+    if (itemType === 'reasoning') {
+      flushAssistant();
+      const thinking = translateReasoningItem(item, param);
+      if (thinking) ensurePendingAssistant().message.thinking = thinking;
       continue;
     }
 
@@ -181,7 +270,9 @@ function translateInput(input, instructions, toolNames) {
       }
       const args = parseFunctionArguments(item.arguments, `${param}.arguments`);
       knownCalls.set(callId, upstreamName);
-      pendingToolCalls.push({
+      const pending = ensurePendingAssistant();
+      if (!pending.message.tool_calls) pending.message.tool_calls = [];
+      pending.message.tool_calls.push({
         id: callId,
         type: 'function',
         function: { name: upstreamName, arguments: args }
@@ -190,7 +281,7 @@ function translateInput(input, instructions, toolNames) {
     }
 
     if (itemType === 'function_call_output') {
-      flushToolCalls();
+      flushAssistant();
       const callId = typeof item.call_id === 'string' && item.call_id ? item.call_id : null;
       if (!callId || !knownCalls.has(callId)) {
         invalid('UNKNOWN_TOOL_CALL_ID', `Unknown function call_id: ${String(callId)}.`, `${param}.call_id`);
@@ -209,7 +300,7 @@ function translateInput(input, instructions, toolNames) {
     invalid('UNSUPPORTED_INPUT_ITEM', `Unsupported input item type: ${String(itemType)}.`, `${param}.type`);
   }
 
-  flushToolCalls();
+  flushAssistant();
   return finishMessages();
 }
 
@@ -328,7 +419,7 @@ function translateReasoning(reasoning, reasoningEffort, defaultThink) {
   return reasoningEffortToThink(effort);
 }
 
-export function translateResponsesRequest(body, activeModel, forcedKeepAlive, defaultThink) {
+export function translateResponsesRequest(body, activeModel, forcedKeepAlive, defaultThink, contextShift = false) {
   if (arguments.length < 4) defaultThink = false;
   if (!isPlainObject(body)) invalid('INVALID_REQUEST_BODY', 'The request body must be a JSON object.');
   if (!activeModel) throw new ResponsesApiError(503, 'NO_ACTIVE_MODEL', 'No active model marker is available.', 'model', 'server_error');
@@ -368,6 +459,7 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
     model: activeModel,
     messages: translateInput(body.input, body.instructions, translatedTools.toolNames),
     stream: body.stream === true,
+    shift: contextShift,
     keep_alive: forcedKeepAlive,
     ...(translatedTools.tools.length ? { tools: translatedTools.tools } : {}),
     ...(Object.keys(options).length ? { options } : {}),
@@ -387,7 +479,12 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
   };
 }
 
-function usageFromOllama(payload) {
+function usageFromOllama(payload, reasoningProduced = false) {
+  // Ollama currently reports only aggregate eval_count, not the exact split
+  // between thinking and visible output. A completed Responses usage object
+  // requires an exact reasoning_tokens integer, so omit usage entirely when
+  // reasoning was produced rather than misreporting zero or estimating.
+  if (reasoningProduced) return null;
   const inputTokens = Number.isFinite(payload?.prompt_eval_count) ? payload.prompt_eval_count : 0;
   const outputTokens = Number.isFinite(payload?.eval_count) ? payload.eval_count : 0;
   return {
@@ -489,6 +586,16 @@ function messageOutputItem(text) {
   };
 }
 
+function reasoningOutputItem(thinking) {
+  return {
+    id: newId('rs'),
+    type: 'reasoning',
+    status: 'completed',
+    summary: [],
+    content: [{ type: 'reasoning_text', text: thinking }]
+  };
+}
+
 export function translateOllamaResponse(
   payload,
   requestBody,
@@ -501,6 +608,7 @@ export function translateOllamaResponse(
     throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_RESPONSE', 'Ollama returned a malformed chat response.', null, 'server_error');
   }
   const text = typeof payload.message.content === 'string' ? payload.message.content : '';
+  const thinking = typeof payload.message.thinking === 'string' ? payload.message.thinking : '';
   const rawToolCalls = Array.isArray(payload.message.tool_calls) ? payload.message.tool_calls : [];
   const toolCalls = rawToolCalls.map((toolCall, index) => normalizeUpstreamToolCall(toolCall, index, toolNames));
   const callIds = new Set();
@@ -511,12 +619,13 @@ export function translateOllamaResponse(
     callIds.add(toolCall.call_id);
   }
   const output = [];
+  if (thinking) output.push(reasoningOutputItem(thinking));
   if (text || !toolCalls.length) output.push(messageOutputItem(text));
   output.push(...toolCalls);
   return {
     ...responseShell(requestBody, activeModel, responseId, createdAt, 'completed'),
     output,
-    usage: usageFromOllama(payload)
+    usage: usageFromOllama(payload, Boolean(thinking))
   };
 }
 
@@ -551,6 +660,7 @@ class StreamingResponseBuilder {
     this.createdAt = createdAt;
     this.toolNames = toolNames;
     this.output = [];
+    this.reasoningItem = null;
     this.textItem = null;
     this.toolItems = [];
     this.toolKeys = new Map();
@@ -567,6 +677,63 @@ class StreamingResponseBuilder {
   async start() {
     await this.writer.event('response.created', { response: this.shell('in_progress') });
     await this.writer.event('response.in_progress', { response: this.shell('in_progress') });
+  }
+
+  async ensureReasoningItem() {
+    if (this.reasoningItem) return this.reasoningItem;
+    const item = {
+      id: newId('rs'),
+      type: 'reasoning',
+      status: 'in_progress',
+      summary: [],
+      content: [{ type: 'reasoning_text', text: '' }]
+    };
+    const outputIndex = this.output.length;
+    this.output.push(item);
+    this.reasoningItem = { item, outputIndex, done: false };
+    await this.writer.event('response.output_item.added', {
+      output_index: outputIndex,
+      item: { ...item, content: [] }
+    });
+    return this.reasoningItem;
+  }
+
+  async addThinking(delta) {
+    if (!delta) return;
+    if (this.reasoningItem?.done) {
+      throw new ResponsesApiError(
+        502,
+        'MALFORMED_UPSTREAM_REASONING_ORDER',
+        'Ollama returned thinking after assistant output began.',
+        null,
+        'server_error'
+      );
+    }
+    const { item, outputIndex } = await this.ensureReasoningItem();
+    item.content[0].text += delta;
+    await this.writer.event('response.reasoning_text.delta', {
+      item_id: item.id,
+      output_index: outputIndex,
+      content_index: 0,
+      delta
+    });
+  }
+
+  async finishReasoning() {
+    if (!this.reasoningItem || this.reasoningItem.done) return;
+    const tracked = this.reasoningItem;
+    tracked.done = true;
+    tracked.item.status = 'completed';
+    await this.writer.event('response.reasoning_text.done', {
+      item_id: tracked.item.id,
+      output_index: tracked.outputIndex,
+      content_index: 0,
+      text: tracked.item.content[0].text
+    });
+    await this.writer.event('response.output_item.done', {
+      output_index: tracked.outputIndex,
+      item: tracked.item
+    });
   }
 
   async ensureTextItem() {
@@ -593,6 +760,7 @@ class StreamingResponseBuilder {
 
   async addText(delta) {
     if (!delta) return;
+    await this.finishReasoning();
     const { item, outputIndex } = await this.ensureTextItem();
     item.content[0].text += delta;
     await this.writer.event('response.output_text.delta', {
@@ -605,6 +773,7 @@ class StreamingResponseBuilder {
   }
 
   async addToolCall(toolCall, index) {
+    await this.finishReasoning();
     if (!isPlainObject(toolCall) || !isPlainObject(toolCall.function)) {
       throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'Ollama returned a malformed function call.', null, 'server_error');
     }
@@ -666,6 +835,7 @@ class StreamingResponseBuilder {
   }
 
   async complete() {
+    await this.finishReasoning();
     if (!this.textItem && !this.toolItems.length) await this.ensureTextItem();
     if (this.textItem) {
       const { item, outputIndex } = this.textItem;
@@ -703,7 +873,7 @@ class StreamingResponseBuilder {
     }
 
     const completed = this.shell('completed');
-    completed.usage = usageFromOllama(this.donePayload);
+    completed.usage = usageFromOllama(this.donePayload, Boolean(this.reasoningItem));
     await this.writer.event('response.completed', { response: completed });
     return completed;
   }
@@ -739,6 +909,7 @@ async function processNdjsonStream(upstreamResponse, builder) {
         throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_STREAM', 'Ollama returned malformed NDJSON.', null, 'server_error');
       }
       if (payload.error) throw new ResponsesApiError(502, 'UPSTREAM_GENERATION_FAILED', String(payload.error), null, 'server_error');
+      if (typeof payload.message?.thinking === 'string') await builder.addThinking(payload.message.thinking);
       if (typeof payload.message?.content === 'string') await builder.addText(payload.message.content);
       if (Array.isArray(payload.message?.tool_calls)) {
         for (let index = 0; index < payload.message.tool_calls.length; index += 1) {
@@ -759,6 +930,7 @@ async function processNdjsonStream(upstreamResponse, builder) {
       throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_STREAM', 'Ollama returned malformed NDJSON.', null, 'server_error');
     }
     if (payload.error) throw new ResponsesApiError(502, 'UPSTREAM_GENERATION_FAILED', String(payload.error), null, 'server_error');
+    if (typeof payload.message?.thinking === 'string') await builder.addThinking(payload.message.thinking);
     if (typeof payload.message?.content === 'string') await builder.addText(payload.message.content);
     if (Array.isArray(payload.message?.tool_calls)) {
       for (let index = 0; index < payload.message.tool_calls.length; index += 1) {
@@ -856,7 +1028,13 @@ export async function handleResponsesRequest(request, response, pathname, contex
     } catch (error) {
       throw new ResponsesApiError(503, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT', error.message, 'reasoning', 'server_error');
     }
-    translated = translateResponsesRequest(body, activeModelInfo.model, context.config.forcedKeepAlive, defaultThink);
+    translated = translateResponsesRequest(
+      body,
+      activeModelInfo.model,
+      context.config.forcedKeepAlive,
+      defaultThink,
+      context.config.responsesContextShift
+    );
     const thinkPolicy = await normalizeThinkForModel(
       context.config,
       activeModelInfo.model,

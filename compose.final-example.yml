@@ -20,6 +20,7 @@ services:
       ADMIN_BIND_HOST: "${ADMIN_BIND_HOST:-0.0.0.0}"
       ADMIN_PORT: "${ADMIN_PORT:-11435}"
       OLLAMA_UPSTREAM_URL: "http://ollama-backend:11434"
+      RESPONSES_CONTEXT_SHIFT: "${RESPONSES_CONTEXT_SHIFT:-false}"
       ACTIVE_MODEL_FILE: "/app/runtime/active-model.json"
       MODEL_POLICY_MODE: "active-only"
       REWRITE_REQUESTED_MODEL_TO_ACTIVE: "${REWRITE_REQUESTED_MODEL_TO_ACTIVE:-false}"

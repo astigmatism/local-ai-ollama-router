@@ -41,6 +41,7 @@ The admin portal and its admin-port JSON APIs are intentionally unauthenticated.
 |---|---:|---|
 | `OLLAMA_UPSTREAM_URL` | `http://ollama:11434` | Raw Ollama backend URL. |
 | `OLLAMA_UPSTREAM_TIMEOUT_MS` | `900000` | Long timeout for large model loads/responses. |
+| `RESPONSES_CONTEXT_SHIFT` | `false` | Controls Ollama `shift` only for `/v1/responses` and `/responses`; disabled by default so Codex requests fail instead of silently shifting old context. |
 
 ## Active model
 

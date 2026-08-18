@@ -98,6 +98,7 @@ MODEL_POLICY_MODE=active-only
 REWRITE_REQUESTED_MODEL_TO_ACTIVE=false
 FORCE_KEEP_ALIVE=-1
 DEFAULT_THINK=
+RESPONSES_CONTEXT_SHIFT=false
 ALLOW_MODEL_MANAGEMENT=false
 USE_ACTIVE_MODEL_WHEN_MISSING=false
 ```
@@ -112,7 +113,9 @@ The router uses Ollama's advertised `thinking` capability to avoid enabling thin
 
 ## Codex CLI through the Responses API
 
-The Responses adapter has its own stricter model boundary. A request may omit `model` or name the exact active marker model; any other value receives HTTP 400. This rule cannot be relaxed by `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, or `REWRITE_REQUESTED_MODEL_TO_ACTIVE`. The adapter always calls only Ollama `/api/chat` with the active model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path.
+The Responses adapter has its own stricter model boundary. A request may omit `model` or name the exact active marker model; any other value receives HTTP 400. This rule cannot be relaxed by `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, or `REWRITE_REQUESTED_MODEL_TO_ACTIVE`. The adapter always calls only Ollama `/api/chat` with the active model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
+
+Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Because Ollama currently provides no exact reasoning-token count separate from aggregate `eval_count`, Responses with thinking report `usage: null`; non-thinking usage is unchanged.
 
 Codex CLI 0.144.3 can be configured with:
 
