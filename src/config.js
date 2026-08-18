@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { parseDefaultThink } from './reasoning.js';
 
 function envString(env, key, fallback) {
   const value = env[key];
@@ -41,6 +42,8 @@ export function normalizeBaseUrl(value) {
 export function loadConfig(env = process.env) {
   const dataDir = envString(env, 'DATA_DIR', '/app/data');
   const adminToken = envString(env, 'ADMIN_TOKEN', '');
+  const defaultThinkRaw = envString(env, 'DEFAULT_THINK', '');
+  const defaultThinkConfigured = Boolean(defaultThinkRaw);
   return Object.freeze({
     appName: 'local-ai-ollama-router',
     version: envString(env, 'ROUTER_VERSION', '0.1.0'),
@@ -58,6 +61,8 @@ export function loadConfig(env = process.env) {
     allowedModels: envCsv(env, 'ALLOWED_MODELS', []),
     rewriteRequestedModelToActive: envBool(env, 'REWRITE_REQUESTED_MODEL_TO_ACTIVE', false),
     forcedKeepAlive: parseKeepAlive(envString(env, 'FORCE_KEEP_ALIVE', '-1')),
+    defaultThinkConfigured,
+    defaultThink: defaultThinkConfigured ? parseDefaultThink(defaultThinkRaw) : undefined,
     protectedModelEndpoints: envCsv(env, 'PROTECTED_MODEL_ENDPOINTS', ['/api/chat', '/api/generate', '/api/embed', '/api/embeddings']),
     useActiveModelWhenMissing: envBool(env, 'USE_ACTIVE_MODEL_WHEN_MISSING', false),
     allowModelManagement: envBool(env, 'ALLOW_MODEL_MANAGEMENT', false),
@@ -97,6 +102,8 @@ export function publicConfig(config) {
     allowedModels: config.allowedModels,
     rewriteRequestedModelToActive: config.rewriteRequestedModelToActive,
     forcedKeepAlive: config.forcedKeepAlive,
+    defaultThinkConfigured: config.defaultThinkConfigured,
+    defaultThink: config.defaultThink ?? null,
     protectedModelEndpoints: config.protectedModelEndpoints,
     useActiveModelWhenMissing: config.useActiveModelWhenMissing,
     allowModelManagement: config.allowModelManagement,

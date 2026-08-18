@@ -12,6 +12,8 @@ function parseMarker(raw, filePath) {
         model: parsed.model.trim(),
         profile: typeof parsed.profile === 'string' ? parsed.profile : null,
         keep_alive: parsed.keep_alive ?? null,
+        default_think: Object.hasOwn(parsed, 'default_think') ? parsed.default_think : null,
+        default_think_configured: Object.hasOwn(parsed, 'default_think') && parsed.default_think !== null,
         updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : null,
         source: typeof parsed.source === 'string' ? parsed.source : filePath,
         raw: parsed
@@ -23,6 +25,8 @@ function parseMarker(raw, filePath) {
       model: trimmed,
       profile: null,
       keep_alive: null,
+      default_think: null,
+      default_think_configured: false,
       updated_at: null,
       source: filePath,
       raw: trimmed
@@ -56,6 +60,8 @@ export async function readActiveModel(config) {
           model: config.activeModelFallback || null,
           profile: null,
           keep_alive: null,
+          default_think: null,
+          default_think_configured: false,
           updated_at: null,
           source: `fallback after marker read error: ${error.message}`,
           loadedFrom: config.activeModelFallback ? 'env-fallback' : 'missing',
@@ -72,6 +78,8 @@ export async function readActiveModel(config) {
       model: config.activeModelFallback,
       profile: null,
       keep_alive: null,
+      default_think: null,
+      default_think_configured: false,
       updated_at: null,
       source: 'ACTIVE_MODEL environment fallback',
       loadedFrom: 'env-fallback',
@@ -84,6 +92,8 @@ export async function readActiveModel(config) {
     model: null,
     profile: null,
     keep_alive: null,
+    default_think: null,
+    default_think_configured: false,
     updated_at: null,
     source: 'no active model marker or ACTIVE_MODEL fallback',
     loadedFrom: 'missing',
@@ -98,6 +108,7 @@ export async function writeActiveModelMarker(filePath, marker) {
     model: marker.model,
     profile: marker.profile ?? null,
     keep_alive: marker.keep_alive ?? -1,
+    ...(marker.default_think === undefined ? {} : { default_think: marker.default_think }),
     updated_at: marker.updated_at ?? new Date().toISOString(),
     source: marker.source ?? 'local-ai-ollama-router'
   };

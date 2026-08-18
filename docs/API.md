@@ -53,7 +53,9 @@ Policy-enforced. Default behavior:
 - rejects non-active model
 - overwrites `keep_alive` to `-1` for active model
 - preserves non-model request fields such as `messages`, `stream`, `options`, and `format`
-- preserves `think` unless it is enabled and `/api/show` reports that the model lacks the `thinking` capability; unsupported enabled values are dropped
+- accepts `think` as `true`, `false`, `low`, `medium`, `high`, or `max`
+- preserves an explicit `think`; when omitted, composes the active marker's `default_think` over the optional global `DEFAULT_THINK`
+- drops enabled `think` when `/api/show` reports that the model lacks the `thinking` capability
 - streams response when `stream` is omitted or true
 - captures final usage fields when available
 
@@ -106,13 +108,27 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 | `tools` | Function tools and function-only Codex namespace groups are translated to Ollama function definitions. |
 | `tool_choice` | `auto` and `none` only. Other forms receive HTTP 400. |
 | `parallel_tool_calls` | Boolean accepted and reflected in the response. Call IDs remain individually correlated. |
-| `reasoning.effort` | Maps supported effort names to Ollama `think`; omitted, null, or `none` disables it. An enabled value is dropped when `/api/show` reports that the active model lacks the `thinking` capability. |
+| `reasoning.effort` | Maps `none`→`false`, `minimal`→`low`, `low`/`medium`/`high` unchanged, and `xhigh`→`max`. Explicit `max` is also accepted. |
+| `reasoning_effort` | Top-level compatibility alias for `reasoning.effort`; conflicting simultaneous values receive HTTP 400. |
 | `text.format` | Plain text, `json_object`, and `json_schema` formats. |
 | `store` | May be omitted or `false`; `true` and other values receive HTTP 400. |
 | `temperature` | Maps to Ollama `options.temperature`. |
 | `max_output_tokens` | Maps to Ollama `options.num_predict`. |
 
 Unknown optional fields are ignored only when doing so does not claim unsupported behavior. Any non-null `previous_response_id` is rejected because the adapter does not persist response state. WebSocket Responses transport is not implemented.
+
+### Thinking defaults and precedence
+
+Thinking is composed without changing model selection:
+
+1. Protocol-specific explicit request: native `think`, or Responses `reasoning.effort`/`reasoning_effort`.
+2. `default_think` in the active-model marker.
+3. The optional global `DEFAULT_THINK` environment setting.
+4. Endpoint compatibility default: Responses sends `think: false`; native Ollama leaves `think` omitted.
+
+Allowed configured defaults are `true`, `false`/`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `model-default`. `minimal` normalizes to `low`, `xhigh` to `max`, and `model-default` omits the upstream field. Invalid active-marker defaults fail the generation request with HTTP 503 instead of guessing.
+
+Ollama's `thinking` capability is binary metadata; it does not enumerate whether a particular model supports booleans, levels, or disabling. The router therefore preserves valid explicit controls rather than hard-coding model names. Profile owners should set model-appropriate defaults—for example, a level for GPT-OSS, whose Ollama implementation ignores boolean controls.
 
 Supported input items are:
 

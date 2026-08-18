@@ -24,6 +24,7 @@ services:
       MODEL_POLICY_MODE: "active-only"
       REWRITE_REQUESTED_MODEL_TO_ACTIVE: "${REWRITE_REQUESTED_MODEL_TO_ACTIVE:-false}"
       FORCE_KEEP_ALIVE: "-1"
+      DEFAULT_THINK: "${DEFAULT_THINK:-}"
       ALLOW_MODEL_MANAGEMENT: "${ALLOW_MODEL_MANAGEMENT:-false}"
       ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-before-lan-exposure}"
       MAX_BODY_BYTES: "${MAX_BODY_BYTES:-0}"

@@ -22,6 +22,7 @@ The test suite validates:
 - legacy same-port admin auth behavior
 - Ollama-compatible API pass-through and keep-alive preservation/rewriting behavior
 - Responses request/message/tool translation
+- reasoning composition across native `think`, Responses effort aliases, active-model defaults, and global defaults
 - fixed active-model enforcement independent of legacy policy modes
 - non-streaming and SSE text/function-call output
 - full-history function-result correlation by `call_id`

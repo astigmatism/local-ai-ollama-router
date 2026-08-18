@@ -149,7 +149,11 @@ async function makeFixture({ env = {}, configOverrides = {}, marker = true, capa
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'responses-api-test-'));
   const activeModelFile = path.join(dir, 'active-model.json');
   if (marker) {
-    await fs.writeFile(activeModelFile, JSON.stringify({ model: 'active:model', keep_alive: -1 }), 'utf8');
+    await fs.writeFile(activeModelFile, JSON.stringify({
+      model: 'active:model',
+      keep_alive: -1,
+      ...(typeof marker === 'object' ? marker : {})
+    }), 'utf8');
   }
   const config = {
     ...loadConfig({
@@ -223,6 +227,35 @@ test('request translation preserves instructions, message roles, images, JSON fo
     { role: 'user', content: 'describe', images: ['aGVsbG8='] },
     { role: 'assistant', content: 'prior answer' }
   ]);
+});
+
+test('request translation composes nested and top-level reasoning efforts with configurable defaults', () => {
+  const cases = [
+    [{ reasoning: { effort: 'none' } }, false],
+    [{ reasoning: { effort: 'minimal' } }, 'low'],
+    [{ reasoning: { effort: 'medium' } }, 'medium'],
+    [{ reasoning: { effort: 'xhigh' } }, 'max'],
+    [{ reasoning: { effort: 'max' } }, 'max'],
+    [{ reasoning_effort: 'low' }, 'low']
+  ];
+  for (const [reasoning, expected] of cases) {
+    const translated = translateResponsesRequest({ input: 'hello', ...reasoning }, 'active:model', -1);
+    assert.equal(translated.upstreamBody.think, expected);
+  }
+
+  const configured = translateResponsesRequest({ input: 'hello' }, 'active:model', -1, true);
+  assert.equal(configured.upstreamBody.think, true);
+  const modelDefault = translateResponsesRequest({ input: 'hello' }, 'active:model', -1, undefined);
+  assert.equal(Object.hasOwn(modelDefault.upstreamBody, 'think'), false);
+
+  assert.throws(
+    () => translateResponsesRequest({
+      input: 'hello',
+      reasoning: { effort: 'low' },
+      reasoning_effort: 'high'
+    }, 'active:model', -1),
+    (error) => error.code === 'CONFLICTING_REASONING_EFFORT'
+  );
 });
 
 test('request translation reconstructs multiple function calls and ordered outputs by call_id', () => {
@@ -434,6 +467,38 @@ test('Responses reasoning drops enabled think for unsupported models and preserv
     assert.equal(record.thinkingSupported, true);
   } finally {
     await supported.cleanup();
+  }
+});
+
+test('Responses applies active-model thinking defaults with per-request precedence', async () => {
+  const fixture = await makeFixture({
+    env: { DEFAULT_THINK: 'high' },
+    marker: { default_think: 'low' },
+    capabilities: ['completion', 'thinking']
+  });
+  try {
+    const defaulted = await postResponses(fixture, { input: 'default' });
+    assert.equal(defaulted.status, 200);
+    const explicit = await postResponses(fixture, { input: 'explicit', reasoning_effort: 'xhigh' });
+    assert.equal(explicit.status, 200);
+
+    const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
+    assert.equal(chats[0].body.think, 'low');
+    assert.equal(chats[1].body.think, 'max');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('invalid active-model thinking defaults fail closed before generation', async () => {
+  const fixture = await makeFixture({ marker: { default_think: 'turbo' } });
+  try {
+    const response = await postResponses(fixture, { input: 'hello' });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT');
+    assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/chat'), false);
+  } finally {
+    await fixture.cleanup();
   }
 });
 

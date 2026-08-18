@@ -21,3 +21,16 @@ test('falls back to ACTIVE_MODEL when marker missing', async () => {
   assert.equal(info.model, 'fallback:model');
   assert.equal(info.loadedFrom, 'env-fallback');
 });
+
+test('reads and writes an optional per-model thinking default', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-think-'));
+  const file = path.join(dir, 'active-model.json');
+  await writeActiveModelMarker(file, {
+    model: 'thinking:model',
+    profile: 'reasoning',
+    default_think: 'medium'
+  });
+  const info = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.equal(info.default_think_configured, true);
+  assert.equal(info.default_think, 'medium');
+});

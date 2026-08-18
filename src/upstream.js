@@ -1,4 +1,5 @@
 import { extractUsageFromOllamaObject } from './stream-parser.js';
+import { isThinkingEnabled } from './reasoning.js';
 
 export async function upstreamFetch(config, pathname, options = {}) {
   const controller = new AbortController();
@@ -73,12 +74,6 @@ export async function getOllamaPs(config) {
   } catch (error) {
     return { error: error.message, models: [] };
   }
-}
-
-const THINK_LEVELS = new Set(['low', 'medium', 'high', 'max']);
-
-export function isThinkingEnabled(value) {
-  return value === true || THINK_LEVELS.has(value);
 }
 
 export async function normalizeThinkForModel(config, model, body) {

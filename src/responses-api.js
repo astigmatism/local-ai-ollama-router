@@ -3,10 +3,15 @@ import { once } from 'node:events';
 import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
 import { normalizeThinkForModel } from './upstream.js';
+import {
+  OLLAMA_THINK_LEVELS,
+  RESPONSES_REASONING_EFFORTS,
+  reasoningEffortToThink,
+  resolveDefaultThink
+} from './reasoning.js';
 
 const RESPONSES_PATHS = new Set(['/v1/responses', '/responses']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'developer']);
-const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 export class ResponsesApiError extends Error {
   constructor(statusCode, code, message, param = null, type = 'invalid_request_error') {
@@ -283,20 +288,37 @@ function translateTextFormat(text) {
   invalid('UNSUPPORTED_TEXT_FORMAT', `Unsupported text format: ${format.type}.`, 'text.format.type');
 }
 
-function translateReasoning(reasoning) {
-  if (reasoning === undefined || reasoning === null) return false;
-  if (!isPlainObject(reasoning)) invalid('INVALID_REASONING', 'reasoning must be an object or null.', 'reasoning');
-  if (reasoning.effort === undefined || reasoning.effort === null) return false;
-  if (!REASONING_EFFORTS.has(reasoning.effort)) {
-    invalid('UNSUPPORTED_REASONING_EFFORT', `Unsupported reasoning effort: ${String(reasoning.effort)}.`, 'reasoning.effort');
-  }
-  if (reasoning.effort === 'none') return false;
-  if (reasoning.effort === 'minimal') return 'low';
-  if (reasoning.effort === 'xhigh') return 'high';
-  return reasoning.effort;
+function validateDefaultThink(defaultThink) {
+  if (defaultThink === undefined || typeof defaultThink === 'boolean' || OLLAMA_THINK_LEVELS.has(defaultThink)) return defaultThink;
+  throw new ResponsesApiError(500, 'INVALID_REASONING_DEFAULT', 'The configured thinking default is invalid.', 'reasoning', 'server_error');
 }
 
-export function translateResponsesRequest(body, activeModel, forcedKeepAlive) {
+function translateReasoning(reasoning, reasoningEffort, defaultThink) {
+  if (reasoning !== undefined && reasoning !== null && !isPlainObject(reasoning)) {
+    invalid('INVALID_REASONING', 'reasoning must be an object or null.', 'reasoning');
+  }
+
+  const nestedEffort = reasoning?.effort;
+  const hasNestedEffort = nestedEffort !== undefined && nestedEffort !== null;
+  const hasTopLevelEffort = reasoningEffort !== undefined && reasoningEffort !== null;
+  if (hasNestedEffort && hasTopLevelEffort && nestedEffort !== reasoningEffort) {
+    invalid('CONFLICTING_REASONING_EFFORT', 'reasoning.effort and reasoning_effort must match when both are provided.', 'reasoning_effort');
+  }
+
+  const effort = nestedEffort ?? reasoningEffort;
+  if (effort === undefined || effort === null) return validateDefaultThink(defaultThink);
+  if (!RESPONSES_REASONING_EFFORTS.has(effort)) {
+    invalid(
+      'UNSUPPORTED_REASONING_EFFORT',
+      `Unsupported reasoning effort: ${String(effort)}.`,
+      hasNestedEffort ? 'reasoning.effort' : 'reasoning_effort'
+    );
+  }
+  return reasoningEffortToThink(effort);
+}
+
+export function translateResponsesRequest(body, activeModel, forcedKeepAlive, defaultThink) {
+  if (arguments.length < 4) defaultThink = false;
   if (!isPlainObject(body)) invalid('INVALID_REQUEST_BODY', 'The request body must be a JSON object.');
   if (!activeModel) throw new ResponsesApiError(503, 'NO_ACTIVE_MODEL', 'No active model marker is available.', 'model', 'server_error');
 
@@ -328,7 +350,7 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive) {
   if (body.temperature !== undefined && body.temperature !== null) options.temperature = body.temperature;
   if (body.max_output_tokens !== undefined && body.max_output_tokens !== null) options.num_predict = body.max_output_tokens;
   const format = translateTextFormat(body.text);
-  const think = translateReasoning(body.reasoning);
+  const think = translateReasoning(body.reasoning, body.reasoning_effort, defaultThink);
 
   const upstreamBody = {
     model: activeModel,
@@ -338,7 +360,7 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive) {
     ...(translatedTools.tools.length ? { tools: translatedTools.tools } : {}),
     ...(Object.keys(options).length ? { options } : {}),
     ...(format === undefined ? {} : { format }),
-    think
+    ...(think === undefined ? {} : { think })
   };
 
   return {
@@ -814,7 +836,13 @@ export async function handleResponsesRequest(request, response, pathname, contex
     if (context.state.maintenanceMode) {
       throw new ResponsesApiError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.', null, 'server_error');
     }
-    translated = translateResponsesRequest(body, activeModelInfo.model, context.config.forcedKeepAlive);
+    let defaultThink;
+    try {
+      defaultThink = resolveDefaultThink(activeModelInfo, context.config, false);
+    } catch (error) {
+      throw new ResponsesApiError(503, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT', error.message, 'reasoning', 'server_error');
+    }
+    translated = translateResponsesRequest(body, activeModelInfo.model, context.config.forcedKeepAlive, defaultThink);
     const thinkPolicy = await normalizeThinkForModel(
       context.config,
       activeModelInfo.model,

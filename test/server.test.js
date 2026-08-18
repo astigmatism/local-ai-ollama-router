@@ -279,6 +279,49 @@ test('API chat drops enabled think for unsupported models and preserves it for s
   }
 });
 
+test('API chat applies a configured default think only when the request omits it', async () => {
+  const fixture = await makeFixture({ DEFAULT_THINK: 'medium' }, { capabilities: ['completion', 'thinking'] });
+  try {
+    for (const body of [
+      { model: 'active:model', stream: false, messages: [{ role: 'user', content: 'default' }] },
+      { model: 'active:model', stream: false, think: false, messages: [{ role: 'user', content: 'explicit' }] }
+    ]) {
+      const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
+    assert.equal(chats[0].body.think, 'medium');
+    assert.equal(chats[1].body.think, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('API chat preserves model-default behavior when no router default is configured', async () => {
+  const fixture = await makeFixture({}, { capabilities: ['completion', 'thinking'] });
+  try {
+    const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'active:model',
+        stream: false,
+        messages: [{ role: 'user', content: 'model default' }]
+      })
+    });
+    assert.equal(response.status, 200);
+    const chat = fixture.upstream.requests.find((item) => item.pathname === '/api/chat');
+    assert.equal(Object.hasOwn(chat.body, 'think'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('Responses compatibility does not change existing model discovery, inspection, generation, or management routes', async () => {
   const fixture = await makeFixture();
   try {

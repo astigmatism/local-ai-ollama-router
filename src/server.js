@@ -12,6 +12,7 @@ import { handleResponsesRequest, isResponsesPath } from './responses-api.js';
 import { NdjsonUsageCollector, extractUsageFromOllamaObject } from './stream-parser.js';
 import { getGpuTelemetry } from './telemetry.js';
 import { activeModelLoadedState, checkUpstream, getOllamaPs, normalizeThinkForModel, upstreamJson } from './upstream.js';
+import { resolveDefaultThink } from './reasoning.js';
 import {
   copyUpstreamHeaders,
   filterRequestHeaders,
@@ -387,7 +388,26 @@ async function handleProxy(request, response, url, context) {
   }
 
   if (['/api/chat', '/api/generate'].includes(pathname)) {
-    thinkPolicy = await normalizeThinkForModel(context.config, policy.forwardedModel, policy.sanitizedBody);
+    let bodyWithThinkDefault = policy.sanitizedBody;
+    const canApplyThinkDefault = bodyWithThinkDefault
+      && typeof bodyWithThinkDefault === 'object'
+      && !Array.isArray(bodyWithThinkDefault)
+      && !Object.hasOwn(bodyWithThinkDefault, 'think');
+    if (canApplyThinkDefault) {
+      let defaultThink;
+      try {
+        defaultThink = resolveDefaultThink(activeModel, context.config);
+      } catch (error) {
+        await rejectProxyRequest(response, context, commonRecord, 503, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT', error.message, {
+          activeModel: policy.activeModel,
+          requestedModel: policy.requestedModel,
+          forwardedModel: policy.forwardedModel
+        });
+        return;
+      }
+      if (defaultThink !== undefined) bodyWithThinkDefault = { ...bodyWithThinkDefault, think: defaultThink };
+    }
+    thinkPolicy = await normalizeThinkForModel(context.config, policy.forwardedModel, bodyWithThinkDefault);
     sanitizedBody = thinkPolicy.body;
     Object.assign(commonRecord, {
       incomingThink: thinkPolicy.incomingThink,

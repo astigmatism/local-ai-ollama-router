@@ -26,6 +26,7 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
 - Active-model fail-closed policy by default.
 - Request-level `keep_alive` normalization to `-1` for protected active-model requests.
 - Capability-aware `think` normalization that drops enabled thinking for models that do not advertise Ollama's `thinking` capability.
+- Cross-protocol thinking composition with request, active-model, and optional global defaults.
 - Streaming and non-streaming pass-through.
 - Persistent request log in JSONL.
 - Persistent activity/event log in JSONL.
@@ -78,12 +79,15 @@ Example marker:
   "profile": "nighttime",
   "model": "hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser",
   "keep_alive": -1,
+  "default_think": "medium",
   "updated_at": "2026-06-29T00:00:00-07:00",
   "source": "local-ai-config.sh apply nighttime"
 }
 ```
 
 `ACTIVE_MODEL` exists only as a temporary fallback. Prefer the file marker so the router does not invent model selection.
+
+`default_think` is optional. It can be `true`, `false`, `low`, `medium`, `high`, `max`, or `model-default`, and applies only while that marker's model is active. This keeps reasoning policy coupled to the deployment profile without allowing a client to select a model.
 
 ## Policy defaults
 
@@ -93,6 +97,7 @@ The default policy is intentionally conservative:
 MODEL_POLICY_MODE=active-only
 REWRITE_REQUESTED_MODEL_TO_ACTIVE=false
 FORCE_KEEP_ALIVE=-1
+DEFAULT_THINK=
 ALLOW_MODEL_MANAGEMENT=false
 USE_ACTIVE_MODEL_WHEN_MISSING=false
 ```
@@ -100,6 +105,10 @@ USE_ACTIVE_MODEL_WHEN_MISSING=false
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
 Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters. The one capability-aware exception is an enabled `think` value (`true` or a reasoning level): before `/api/chat` or `/api/generate` is forwarded, the router checks `/api/show` and drops `think` when the model does not advertise the `thinking` capability. Explicit `false` values are preserved. If model capabilities cannot be read, the router leaves `think` unchanged rather than guessing.
+
+Native `/api/chat` and `/api/generate` requests may set `think` per request to `true`, `false`, `low`, `medium`, `high`, or `max`. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias; `none` maps to `false`, `minimal` to `low`, and `xhigh` to `max`. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think` and retain the model's behavior, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
+
+The router uses Ollama's advertised `thinking` capability to avoid enabling thinking on unsupported models, but Ollama does not advertise which control forms each model honors. For example, GPT-OSS requires level strings and ignores booleans, so use a profile default such as `default_think: "low"`; `false` cannot force that model to disable its trace.
 
 ## Codex CLI through the Responses API
 
@@ -121,6 +130,8 @@ requires_openai_auth = false
 ```
 
 `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models`; configure the active model explicitly in Codex.
+
+Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated to Ollama `think: "max"`.
 
 The endpoint is stateless: omit `store` or send `store: false`, resend prior response items for tool follow-ups, and do not send `previous_response_id`. See `docs/API.md` for supported fields, item types, curl examples, and error behavior.
 

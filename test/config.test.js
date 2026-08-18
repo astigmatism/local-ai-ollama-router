@@ -38,3 +38,20 @@ test('defaults request bodies to unlimited while preserving configurable caps', 
   assert.equal(loadConfig({ MAX_BODY_BYTES: '1048576' }).maxBodyBytes, 1048576);
   assert.equal(loadConfig({ MAX_BODY_BYTES: '-1' }).maxBodyBytes, 0);
 });
+
+test('parses optional cross-protocol thinking defaults without changing endpoint defaults when absent', () => {
+  const absent = loadConfig({});
+  assert.equal(absent.defaultThinkConfigured, false);
+  assert.equal(absent.defaultThink, undefined);
+  assert.equal(publicConfig(absent).defaultThink, null);
+
+  const configured = loadConfig({ DEFAULT_THINK: 'xhigh' });
+  assert.equal(configured.defaultThinkConfigured, true);
+  assert.equal(configured.defaultThink, 'max');
+  assert.equal(publicConfig(configured).defaultThink, 'max');
+
+  const modelDefault = loadConfig({ DEFAULT_THINK: 'model-default' });
+  assert.equal(modelDefault.defaultThinkConfigured, true);
+  assert.equal(modelDefault.defaultThink, undefined);
+  assert.throws(() => loadConfig({ DEFAULT_THINK: 'turbo' }), /thinking default/);
+});
