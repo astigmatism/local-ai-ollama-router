@@ -25,7 +25,7 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
 - No token or login for the browser admin portal. It is intended for trusted local/LAN use only.
 - Active-model fail-closed policy by default.
 - Request-level `keep_alive` normalization to `-1` for protected active-model requests.
-- Capability-aware `think` normalization that drops enabled thinking for models that do not advertise Ollama's `thinking` capability.
+- Profile-specific `think` negotiation that maps OpenAI reasoning efforts only to string levels declared safe for the active model.
 - Cross-protocol thinking composition with request, active-model, and optional global defaults.
 - Streaming and non-streaming pass-through.
 - Persistent request log in JSONL.
@@ -50,7 +50,8 @@ cd /home/astigmatism/apps/local-ai-ollama-router
 cp .env.example .env
 
 # Write an active model marker for initial testing:
-./scripts/write-active-model.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser' nighttime
+./scripts/write-active-model.sh 'qwen3.8-27b-uncensored:night' nighttime medium \
+  runtime/reasoning-capabilities.night.example.json
 
 docker compose --env-file .env up --build -d
 curl http://192.168.1.21:11434/api/version
@@ -77,9 +78,18 @@ Example marker:
 ```json
 {
   "profile": "nighttime",
-  "model": "hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser",
+  "model": "qwen3.8-27b-uncensored:night",
   "keep_alive": -1,
   "default_think": "medium",
+  "supported_think_levels": ["low", "medium", "xhigh"],
+  "reasoning_effort_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "xhigh",
+    "xhigh": "xhigh",
+    "max": "xhigh"
+  },
   "updated_at": "2026-06-29T00:00:00-07:00",
   "source": "local-ai-config.sh apply nighttime"
 }
@@ -87,7 +97,25 @@ Example marker:
 
 `ACTIVE_MODEL` exists only as a temporary fallback. Prefer the file marker so the router does not invent model selection.
 
-`default_think` is optional. It can be `true`, `false`, `low`, `medium`, `high`, `max`, or `model-default`, and applies only while that marker's model is active. This keeps reasoning policy coupled to the deployment profile without allowing a client to select a model.
+`scripts/write-active-model.sh` accepts an optional fourth argument containing the capability object. The example day and night objects under `runtime/` can be copied and adapted by the deployment/profile system; they do not select a model themselves.
+
+`default_think` is optional. It can be `true`, `false`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `model-default`, and applies only while that marker's model is active. String defaults are negotiated through the marker's capability map.
+
+`supported_think_levels` and `reasoning_effort_map` are model/profile-specific. They must be supplied together, and every mapped value must appear in `supported_think_levels`. A daytime model that accepts `max` can retain the historical behavior with a separate profile:
+
+```json
+{
+  "supported_think_levels": ["low", "medium", "high", "max"],
+  "reasoning_effort_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max"
+  }
+}
+```
 
 ## Policy defaults
 
@@ -105,11 +133,11 @@ USE_ACTIVE_MODEL_WHEN_MISSING=false
 
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving the rest of the request body, including messages, `options`, `think`, `format`, and other Ollama parameters. The one capability-aware exception is an enabled `think` value (`true` or a reasoning level): before `/api/chat` or `/api/generate` is forwarded, the router checks `/api/show` and drops `think` when the model does not advertise the `thinking` capability. Explicit `false` values are preserved. If model capabilities cannot be read, the router leaves `think` unchanged rather than guessing.
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving other request parameters. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
 
-Native `/api/chat` and `/api/generate` requests may set `think` per request to `true`, `false`, `low`, `medium`, `high`, or `max`. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias; `none` maps to `false`, `minimal` to `low`, and `xhigh` to `max`. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think` and retain the model's behavior, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
+Native `/api/chat` and `/api/generate` requests may set `think` to a boolean or a reasoning effort string. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias. `none` always maps to `false`; every string level is mapped by the active profile, so the same incoming `max` can become `xhigh` at night and remain `max` during the day. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think`, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
 
-The router uses Ollama's advertised `thinking` capability to avoid enabling thinking on unsupported models, but Ollama does not advertise which control forms each model honors. For example, GPT-OSS requires level strings and ignores booleans, so use a profile default such as `default_think: "low"`; `false` cannot force that model to disable its trace.
+Ollama's advertised `thinking` capability remains the binary enabled/disabled check; the profile metadata supplies the missing list of valid string levels. Missing metadata rejects string reasoning with HTTP 503, and invalid or incomplete metadata rejects generation before Ollama is called. No model names are used to infer support.
 
 ## Codex CLI through the Responses API
 
@@ -134,7 +162,7 @@ requires_openai_auth = false
 
 `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models`; configure the active model explicitly in Codex.
 
-Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated to Ollama `think: "max"`.
+Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: "xhigh"` for the nighttime profile and `think: "max"` for the daytime profile above.
 
 The endpoint is stateless: omit `store` or send `store: false`, resend prior response items for tool follow-ups, and do not send `previous_response_id`. See `docs/API.md` for supported fields, item types, curl examples, and error behavior.
 

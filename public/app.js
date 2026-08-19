@@ -199,12 +199,16 @@ function thinkValue(value) {
 }
 
 function thinkCell(row) {
+  const dropped = row.thinkDropped === true
+    || (row.thinkDropped === undefined && row.thinkNormalized && row.forwardedThink === undefined);
   const lines = [
     `in: ${text(thinkValue(row.incomingThink))}`,
-    `out: ${text(row.thinkNormalized ? 'dropped' : thinkValue(row.forwardedThink))}`
+    `out: ${text(dropped ? 'dropped' : thinkValue(row.forwardedThink))}`
   ];
-  if (row.reasoningEffort) lines.push(`effort: ${text(row.reasoningEffort)}`);
-  if (row.thinkNormalized) lines.push('<span class="event-time">control dropped: model lacks thinking</span>');
+  if (row.incomingReasoningEffort) lines.push(`request effort: ${text(row.incomingReasoningEffort)}`);
+  else if (row.reasoningEffort) lines.push(`effective effort: ${text(row.reasoningEffort)}`);
+  if (row.thinkMapped && !dropped) lines.push('<span class="event-time">mapped by active profile</span>');
+  if (dropped) lines.push('<span class="event-time">control dropped: model lacks thinking</span>');
   return lines.join('<br>');
 }
 

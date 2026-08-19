@@ -22,7 +22,8 @@ The test suite validates:
 - legacy same-port admin auth behavior
 - Ollama-compatible API pass-through and keep-alive preservation/rewriting behavior
 - Responses request/message/tool translation
-- reasoning composition across native `think`, Responses effort aliases, active-model defaults, and global defaults
+- day/night profile-specific reasoning negotiation across native chat/generate and Responses, including `max`/`xhigh`, low/medium, defaults, streaming, and non-streaming
+- rejection of missing, incomplete, or inconsistent reasoning capability profiles before Ollama generation
 - fixed active-model enforcement independent of legacy policy modes
 - non-streaming and SSE text/function-call output
 - full-history function-result correlation by `call_id`

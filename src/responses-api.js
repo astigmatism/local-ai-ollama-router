@@ -4,10 +4,8 @@ import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
 import { normalizeThinkForModel } from './upstream.js';
 import {
-  OLLAMA_THINK_LEVELS,
   RESPONSES_REASONING_EFFORTS,
   thinkLevelToReasoningEffort,
-  reasoningEffortToThink,
   resolveDefaultThink
 } from './reasoning.js';
 
@@ -391,7 +389,7 @@ function translateTextFormat(text) {
 }
 
 function validateDefaultThink(defaultThink) {
-  if (defaultThink === undefined || typeof defaultThink === 'boolean' || OLLAMA_THINK_LEVELS.has(defaultThink)) return defaultThink;
+  if (defaultThink === undefined || typeof defaultThink === 'boolean' || RESPONSES_REASONING_EFFORTS.has(defaultThink)) return defaultThink;
   throw new ResponsesApiError(500, 'INVALID_REASONING_DEFAULT', 'The configured thinking default is invalid.', 'reasoning', 'server_error');
 }
 
@@ -408,7 +406,14 @@ function translateReasoning(reasoning, reasoningEffort, defaultThink) {
   }
 
   const effort = nestedEffort ?? reasoningEffort;
-  if (effort === undefined || effort === null) return validateDefaultThink(defaultThink);
+  if (effort === undefined || effort === null) {
+    const think = validateDefaultThink(defaultThink);
+    return {
+      think,
+      incomingReasoningEffort: null,
+      effectiveReasoningEffort: thinkLevelToReasoningEffort(think) ?? null
+    };
+  }
   if (!RESPONSES_REASONING_EFFORTS.has(effort)) {
     invalid(
       'UNSUPPORTED_REASONING_EFFORT',
@@ -416,7 +421,11 @@ function translateReasoning(reasoning, reasoningEffort, defaultThink) {
       hasNestedEffort ? 'reasoning.effort' : 'reasoning_effort'
     );
   }
-  return reasoningEffortToThink(effort);
+  return {
+    think: effort === 'none' ? false : effort,
+    incomingReasoningEffort: effort,
+    effectiveReasoningEffort: effort
+  };
 }
 
 export function translateResponsesRequest(body, activeModel, forcedKeepAlive, defaultThink, contextShift = false) {
@@ -452,8 +461,8 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
   if (body.temperature !== undefined && body.temperature !== null) options.temperature = body.temperature;
   if (body.max_output_tokens !== undefined && body.max_output_tokens !== null) options.num_predict = body.max_output_tokens;
   const format = translateTextFormat(body.text);
-  const think = translateReasoning(body.reasoning, body.reasoning_effort, defaultThink);
-  const translatedReasoningEffort = thinkLevelToReasoningEffort(think);
+  const reasoningTranslation = translateReasoning(body.reasoning, body.reasoning_effort, defaultThink);
+  const think = reasoningTranslation.think;
 
   const upstreamBody = {
     model: activeModel,
@@ -469,7 +478,8 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
 
   return {
     upstreamBody,
-    reasoningEffort: translatedReasoningEffort,
+    incomingReasoningEffort: reasoningTranslation.incomingReasoningEffort,
+    reasoningEffort: reasoningTranslation.effectiveReasoningEffort,
     requestedModel: body.model ?? null,
     stream: body.stream === true,
     toolChoice: translatedTools.toolChoice,
@@ -988,6 +998,9 @@ function outcomeBase(started, pathname, body, activeModel, translated) {
     keepAliveNormalized: Boolean(translated),
     incomingThink: translated?.incomingThink,
     forwardedThink: translated?.forwardedThink,
+    incomingReasoningEffort: translated?.incomingReasoningEffort ?? null,
+    thinkMapped: translated?.thinkMapped ?? false,
+    thinkDropped: translated?.thinkDropped ?? false,
     thinkNormalized: translated?.thinkNormalized ?? false,
     thinkingSupported: translated?.thinkingSupported ?? null,
     reasoningEffort: translated?.reasoningEffort ?? null,
@@ -1035,14 +1048,28 @@ export async function handleResponsesRequest(request, response, pathname, contex
       defaultThink,
       context.config.responsesContextShift
     );
-    const thinkPolicy = await normalizeThinkForModel(
-      context.config,
-      activeModelInfo.model,
-      translated.upstreamBody
-    );
+    let thinkPolicy;
+    try {
+      thinkPolicy = await normalizeThinkForModel(
+        context.config,
+        activeModelInfo.model,
+        translated.upstreamBody,
+        activeModelInfo
+      );
+    } catch (error) {
+      throw new ResponsesApiError(
+        error.statusCode || 503,
+        error.code || 'INVALID_REASONING_CAPABILITIES',
+        error.message,
+        'reasoning',
+        (error.statusCode || 503) >= 500 ? 'server_error' : 'invalid_request_error'
+      );
+    }
     translated.upstreamBody = thinkPolicy.body;
     translated.incomingThink = thinkPolicy.incomingThink;
     translated.forwardedThink = thinkPolicy.forwardedThink;
+    translated.thinkMapped = thinkPolicy.thinkMapped;
+    translated.thinkDropped = thinkPolicy.thinkDropped;
     translated.thinkNormalized = thinkPolicy.thinkNormalized;
     translated.thinkingSupported = thinkPolicy.thinkingSupported;
     abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
@@ -1192,7 +1219,14 @@ export async function handleResponsesRequest(request, response, pathname, contex
       rejected: true,
       status: apiError.statusCode,
       responseStatus: apiError.statusCode,
-      upstreamError: apiError.statusCode >= 500 && !['NO_ACTIVE_MODEL', 'MAINTENANCE_MODE'].includes(apiError.code),
+      upstreamError: apiError.statusCode >= 500 && ![
+        'NO_ACTIVE_MODEL',
+        'MAINTENANCE_MODE',
+        'INVALID_ACTIVE_MODEL_THINK_DEFAULT',
+        'INVALID_REASONING_DEFAULT',
+        'MISSING_REASONING_CAPABILITIES',
+        'INVALID_REASONING_CAPABILITIES'
+      ].includes(apiError.code),
       errorCode: apiError.code,
       errorSummary: apiError.message,
       usage: null,

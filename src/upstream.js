@@ -1,5 +1,5 @@
 import { extractUsageFromOllamaObject } from './stream-parser.js';
-import { isThinkingEnabled } from './reasoning.js';
+import { isThinkingEnabled, normalizeThinkValue, validateReasoningCapabilities } from './reasoning.js';
 
 export async function upstreamFetch(config, pathname, options = {}) {
   const controller = new AbortController();
@@ -76,17 +76,23 @@ export async function getOllamaPs(config) {
   }
 }
 
-export async function normalizeThinkForModel(config, model, body) {
+export async function normalizeThinkForModel(config, model, body, reasoningProfile = null) {
   const incomingThink = body?.think;
+  const validatedCapabilities = validateReasoningCapabilities(reasoningProfile);
+  const mappedThink = normalizeThinkValue(incomingThink, validatedCapabilities);
+  const thinkMapped = mappedThink !== incomingThink;
+  const mappedBody = thinkMapped ? { ...body, think: mappedThink } : body;
   const unchanged = {
-    body,
+    body: mappedBody,
     incomingThink,
-    forwardedThink: incomingThink,
-    thinkNormalized: false,
+    forwardedThink: mappedThink,
+    thinkMapped,
+    thinkDropped: false,
+    thinkNormalized: thinkMapped,
     thinkingSupported: null
   };
 
-  if (!model || !body || typeof body !== 'object' || Array.isArray(body) || !isThinkingEnabled(incomingThink)) {
+  if (!model || !body || typeof body !== 'object' || Array.isArray(body) || !isThinkingEnabled(mappedThink)) {
     return unchanged;
   }
 
@@ -112,6 +118,8 @@ export async function normalizeThinkForModel(config, model, body) {
     body: normalizedBody,
     incomingThink,
     forwardedThink: undefined,
+    thinkMapped,
+    thinkDropped: true,
     thinkNormalized: true,
     thinkingSupported: false
   };

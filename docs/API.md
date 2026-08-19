@@ -53,8 +53,8 @@ Policy-enforced. Default behavior:
 - rejects non-active model
 - overwrites `keep_alive` to `-1` for active model
 - preserves non-model request fields such as `messages`, `stream`, `options`, and `format`
-- accepts `think` as `true`, `false`, `low`, `medium`, `high`, or `max`
-- preserves an explicit `think`; when omitted, composes the active marker's `default_think` over the optional global `DEFAULT_THINK`
+- accepts `think` as `true`, `false`, or a supported reasoning effort string
+- maps string values through the active marker's validated `reasoning_effort_map`; when omitted, composes the active marker's `default_think` over the optional global `DEFAULT_THINK`
 - drops enabled `think` when `/api/show` reports that the model lacks the `thinking` capability
 - streams response when `stream` is omitted or true
 - captures final usage fields when available
@@ -108,7 +108,7 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 | `tools` | Function tools and function-only Codex namespace groups are translated to Ollama function definitions. |
 | `tool_choice` | `auto` and `none` only. Other forms receive HTTP 400. |
 | `parallel_tool_calls` | Boolean accepted and reflected in the response. Call IDs remain individually correlated. |
-| `reasoning.effort` | Maps `none`→`false`, `minimal`→`low`, `low`/`medium`/`high` unchanged, and `xhigh`→`max`. Explicit `max` is also accepted. |
+| `reasoning.effort` | Accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` becomes boolean `false`; other values are mapped by the active model/profile's `reasoning_effort_map`. |
 | `reasoning_effort` | Top-level compatibility alias for `reasoning.effort`; conflicting simultaneous values receive HTTP 400. |
 | `text.format` | Plain text, `json_object`, and `json_schema` formats. |
 | `store` | May be omitted or `false`; `true` and other values receive HTTP 400. |
@@ -126,11 +126,27 @@ Thinking is composed without changing model selection:
 3. The optional global `DEFAULT_THINK` environment setting.
 4. Endpoint compatibility default: Responses sends `think: false`; native Ollama leaves `think` omitted.
 
-Allowed configured defaults are `true`, `false`/`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `model-default`. `minimal` normalizes to `low`, `xhigh` to `max`, and `model-default` omits the upstream field. Invalid active-marker defaults fail the generation request with HTTP 503 instead of guessing.
+Allowed configured defaults are `true`, `false`/`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `model-default`. `model-default` omits the upstream field; string defaults use the same active-profile map as explicit requests. Invalid active-marker defaults fail the generation request with HTTP 503 instead of guessing.
 
-Ollama's `thinking` capability is binary metadata; it does not enumerate whether a particular model supports booleans, levels, or disabling. The router therefore preserves valid explicit controls rather than hard-coding model names. Profile owners should set model-appropriate defaults—for example, a level for GPT-OSS, whose Ollama implementation ignores boolean controls.
+Ollama's `thinking` capability is binary metadata; it does not enumerate valid string levels. Each active marker may therefore declare:
 
-Request records log the incoming and forwarded `think` values, whether the control was dropped for an unsupported model, and the effective `reasoningEffort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). The admin portal request history displays these in a Thinking column.
+```json
+{
+  "supported_think_levels": ["low", "medium", "xhigh"],
+  "reasoning_effort_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "xhigh",
+    "xhigh": "xhigh",
+    "max": "xhigh"
+  }
+}
+```
+
+Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; every target must occur in `supported_think_levels`. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
+
+Request records log `incomingReasoningEffort` separately from `forwardedThink`, along with incoming `think`, the effective effort, and mapping/drop state. Thus a Codex request with `max` and a nighttime forward value of `xhigh` remains distinguishable in telemetry. The admin portal request history displays these in a Thinking column.
 
 Supported input items are:
 
@@ -206,7 +222,7 @@ Errors returned before streaming begins use the OpenAI-compatible envelope:
 }
 ```
 
-Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
+Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
 
 ## Router errors
 
@@ -231,6 +247,9 @@ Common codes:
 | `MODEL_MANAGEMENT_DISABLED` | Pull/create/delete/copy/push disabled. |
 | `ADMIN_REQUIRED` | Legacy admin auth required for a gated model-management endpoint. |
 | `MAINTENANCE_MODE` | Router maintenance mode rejects generation. |
+| `INVALID_THINK_VALUE` | Native `think` is not a boolean or recognized reasoning effort. |
+| `MISSING_REASONING_CAPABILITIES` | A string effort was requested without an active-profile map. |
+| `INVALID_REASONING_CAPABILITIES` | Active-profile reasoning metadata is incomplete or inconsistent. |
 | `UPSTREAM_REQUEST_FAILED` | Raw Ollama request failed before response. |
 | `API_NOT_ON_ADMIN_PORT` | `/api/*` was requested from the admin portal listener instead of the router API listener. |
 

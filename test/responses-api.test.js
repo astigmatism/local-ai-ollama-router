@@ -12,6 +12,30 @@ import {
   translateResponsesRequest
 } from '../src/responses-api.js';
 
+const DAY_REASONING_CAPABILITIES = {
+  supported_think_levels: ['low', 'medium', 'high', 'max'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'max',
+    max: 'max'
+  }
+};
+
+const NIGHT_REASONING_CAPABILITIES = {
+  supported_think_levels: ['low', 'medium', 'xhigh'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'xhigh',
+    xhigh: 'xhigh',
+    max: 'xhigh'
+  }
+};
+
 async function readJsonBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -196,6 +220,7 @@ async function makeFixture({ env = {}, configOverrides = {}, marker = true, capa
     await fs.writeFile(activeModelFile, JSON.stringify({
       model: 'active:model',
       keep_alive: -1,
+      ...DAY_REASONING_CAPABILITIES,
       ...(typeof marker === 'object' ? marker : {})
     }), 'utf8');
   }
@@ -265,7 +290,7 @@ test('request translation preserves instructions, message roles, images, JSON fo
   assert.equal(translated.upstreamBody.shift, false);
   assert.deepEqual(translated.upstreamBody.options, { temperature: 0.25, num_predict: 123 });
   assert.deepEqual(translated.upstreamBody.format, { type: 'object' });
-  assert.equal(translated.upstreamBody.think, 'low');
+  assert.equal(translated.upstreamBody.think, 'minimal');
   assert.deepEqual(translated.upstreamBody.messages, [
     { role: 'system', content: 'top-level instruction\n\ndeveloper instruction' },
     { role: 'user', content: 'describe', images: ['aGVsbG8='] },
@@ -379,9 +404,9 @@ test('hoisted system-equivalent messages preserve function-call grouping boundar
 test('request translation composes nested and top-level reasoning efforts with configurable defaults', () => {
   const cases = [
     [{ reasoning: { effort: 'none' } }, false],
-    [{ reasoning: { effort: 'minimal' } }, 'low'],
+    [{ reasoning: { effort: 'minimal' } }, 'minimal'],
     [{ reasoning: { effort: 'medium' } }, 'medium'],
-    [{ reasoning: { effort: 'xhigh' } }, 'max'],
+    [{ reasoning: { effort: 'xhigh' } }, 'xhigh'],
     [{ reasoning: { effort: 'max' } }, 'max'],
     [{ reasoning_effort: 'low' }, 'low']
   ];
@@ -752,6 +777,84 @@ test('Responses applies active-model thinking defaults with per-request preceden
     assert.equal(chats[1].body.think, 'max');
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test('Responses negotiates day and night efforts for streaming, non-streaming, and omitted defaults', async () => {
+  const profiles = [
+    {
+      marker: { ...NIGHT_REASONING_CAPABILITIES, default_think: 'max' },
+      requests: [
+        [{ input: 'night max', reasoning: { effort: 'max' }, stream: false }, 'max', 'xhigh'],
+        [{ input: 'night xhigh', reasoning_effort: 'xhigh', stream: true }, 'xhigh', 'xhigh'],
+        [{ input: 'night low', reasoning: { effort: 'low' }, stream: false }, 'low', 'low'],
+        [{ input: 'night medium', reasoning: { effort: 'medium' }, stream: true }, 'medium', 'medium'],
+        [{ input: 'night default', stream: false }, null, 'xhigh']
+      ]
+    },
+    {
+      marker: DAY_REASONING_CAPABILITIES,
+      requests: [
+        [{ input: 'day xhigh', reasoning: { effort: 'xhigh' }, stream: false }, 'xhigh', 'max'],
+        [{ input: 'day max', reasoning_effort: 'max', stream: true }, 'max', 'max']
+      ]
+    }
+  ];
+
+  for (const profile of profiles) {
+    const fixture = await makeFixture({ marker: profile.marker, capabilities: ['completion', 'thinking'] });
+    try {
+      for (const [body] of profile.requests) {
+        const response = await postResponses(fixture, body);
+        assert.equal(response.status, 200);
+        await response.text();
+      }
+
+      const chats = fixture.upstream.requests.filter((request) => request.pathname === '/api/chat');
+      assert.deepEqual(chats.map((request) => request.body.think), profile.requests.map((request) => request[2]));
+      const records = fixture.context.store.recentRequests(profile.requests.length).reverse();
+      assert.deepEqual(records.map((record) => record.incomingReasoningEffort), profile.requests.map((request) => request[1]));
+      assert.deepEqual(records.map((record) => record.forwardedThink), profile.requests.map((request) => request[2]));
+      assert.deepEqual(records.map((record) => record.streaming), profile.requests.map((request) => request[0].stream));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test('Responses rejects missing, incomplete, and inconsistent capability profiles before Ollama', async () => {
+  const cases = [
+    {
+      marker: { supported_think_levels: undefined, reasoning_effort_map: undefined },
+      request: { input: 'missing', reasoning: { effort: 'max' } },
+      code: 'MISSING_REASONING_CAPABILITIES'
+    },
+    {
+      marker: { reasoning_effort_map: undefined },
+      request: { input: 'incomplete' },
+      code: 'INVALID_REASONING_CAPABILITIES'
+    },
+    {
+      marker: {
+        reasoning_effort_map: { ...DAY_REASONING_CAPABILITIES.reasoning_effort_map, max: 'xhigh' }
+      },
+      request: { input: 'inconsistent', reasoning: { effort: 'max' } },
+      code: 'INVALID_REASONING_CAPABILITIES'
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = await makeFixture({ marker: item.marker, capabilities: ['completion', 'thinking'] });
+    try {
+      const response = await postResponses(fixture, item.request);
+      assert.equal(response.status, 503);
+      assert.equal((await response.json()).error.code, item.code);
+      assert.equal(fixture.upstream.requests.some((request) => request.pathname === '/api/chat'), false);
+      assert.equal(fixture.upstream.requests.some((request) => request.pathname === '/api/show'), false);
+      assert.equal(fixture.context.store.recentRequests(1)[0].upstreamError, false);
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 

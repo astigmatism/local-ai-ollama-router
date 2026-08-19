@@ -42,6 +42,8 @@ This is enforced at the router so individual clients do not need to remember or 
 
 `src/active-model.js` reads `/app/runtime/active-model.json` or falls back to `ACTIVE_MODEL`. The deployment/profile system should write the marker.
 
+The marker is also the source of truth for model-specific reasoning capabilities. `src/reasoning.js` validates `supported_think_levels` and `reasoning_effort_map`; `src/upstream.js` applies that map before the shared `/api/show` thinking-capability check. This path is used by Responses, native chat, and native generate requests.
+
 ### Proxy and streaming support
 
 The proxy forwards sanitized JSON bodies to raw Ollama and streams response chunks back to the client without buffering the full response. It observes newline-delimited JSON chunks to capture the final usage object when `done: true`.
@@ -97,7 +99,7 @@ Fields include:
 - requested model
 - active model at request time
 - incoming and forwarded `keep_alive`
-- incoming and forwarded `think`, whether the control was dropped, and the effective reasoning effort
+- incoming `think`, incoming Responses reasoning effort, forwarded `think`, mapping/drop state, and the effective reasoning effort
 - allow/reject state
 - upstream response status
 - latency

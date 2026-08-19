@@ -34,3 +34,27 @@ test('reads and writes an optional per-model thinking default', async () => {
   assert.equal(info.default_think_configured, true);
   assert.equal(info.default_think, 'medium');
 });
+
+test('reads and writes model/profile-specific reasoning capabilities', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-reasoning-'));
+  const file = path.join(dir, 'active-model.json');
+  const supportedThinkLevels = ['low', 'medium', 'xhigh'];
+  const reasoningEffortMap = {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'xhigh',
+    xhigh: 'xhigh',
+    max: 'xhigh'
+  };
+  await writeActiveModelMarker(file, {
+    model: 'thinking:model',
+    profile: 'night',
+    supported_think_levels: supportedThinkLevels,
+    reasoning_effort_map: reasoningEffortMap
+  });
+  const info = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.equal(info.reasoning_capabilities_configured, true);
+  assert.deepEqual(info.supported_think_levels, supportedThinkLevels);
+  assert.deepEqual(info.reasoning_effort_map, reasoningEffortMap);
+});

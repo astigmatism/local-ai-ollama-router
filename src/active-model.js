@@ -8,12 +8,17 @@ function parseMarker(raw, filePath) {
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed && typeof parsed === 'object' && typeof parsed.model === 'string' && parsed.model.trim()) {
+      const hasSupportedThinkLevels = Object.hasOwn(parsed, 'supported_think_levels');
+      const hasReasoningEffortMap = Object.hasOwn(parsed, 'reasoning_effort_map');
       return {
         model: parsed.model.trim(),
         profile: typeof parsed.profile === 'string' ? parsed.profile : null,
         keep_alive: parsed.keep_alive ?? null,
         default_think: Object.hasOwn(parsed, 'default_think') ? parsed.default_think : null,
         default_think_configured: Object.hasOwn(parsed, 'default_think') && parsed.default_think !== null,
+        supported_think_levels: hasSupportedThinkLevels ? parsed.supported_think_levels : null,
+        reasoning_effort_map: hasReasoningEffortMap ? parsed.reasoning_effort_map : null,
+        reasoning_capabilities_configured: hasSupportedThinkLevels || hasReasoningEffortMap,
         updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : null,
         source: typeof parsed.source === 'string' ? parsed.source : filePath,
         raw: parsed
@@ -27,6 +32,9 @@ function parseMarker(raw, filePath) {
       keep_alive: null,
       default_think: null,
       default_think_configured: false,
+      supported_think_levels: null,
+      reasoning_effort_map: null,
+      reasoning_capabilities_configured: false,
       updated_at: null,
       source: filePath,
       raw: trimmed
@@ -62,6 +70,9 @@ export async function readActiveModel(config) {
           keep_alive: null,
           default_think: null,
           default_think_configured: false,
+          supported_think_levels: null,
+          reasoning_effort_map: null,
+          reasoning_capabilities_configured: false,
           updated_at: null,
           source: `fallback after marker read error: ${error.message}`,
           loadedFrom: config.activeModelFallback ? 'env-fallback' : 'missing',
@@ -80,6 +91,9 @@ export async function readActiveModel(config) {
       keep_alive: null,
       default_think: null,
       default_think_configured: false,
+      supported_think_levels: null,
+      reasoning_effort_map: null,
+      reasoning_capabilities_configured: false,
       updated_at: null,
       source: 'ACTIVE_MODEL environment fallback',
       loadedFrom: 'env-fallback',
@@ -94,6 +108,9 @@ export async function readActiveModel(config) {
     keep_alive: null,
     default_think: null,
     default_think_configured: false,
+    supported_think_levels: null,
+    reasoning_effort_map: null,
+    reasoning_capabilities_configured: false,
     updated_at: null,
     source: 'no active model marker or ACTIVE_MODEL fallback',
     loadedFrom: 'missing',
@@ -109,6 +126,8 @@ export async function writeActiveModelMarker(filePath, marker) {
     profile: marker.profile ?? null,
     keep_alive: marker.keep_alive ?? -1,
     ...(marker.default_think === undefined ? {} : { default_think: marker.default_think }),
+    ...(marker.supported_think_levels === undefined ? {} : { supported_think_levels: marker.supported_think_levels }),
+    ...(marker.reasoning_effort_map === undefined ? {} : { reasoning_effort_map: marker.reasoning_effort_map }),
     updated_at: marker.updated_at ?? new Date().toISOString(),
     source: marker.source ?? 'local-ai-ollama-router'
   };

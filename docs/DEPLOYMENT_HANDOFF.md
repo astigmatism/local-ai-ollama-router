@@ -51,7 +51,8 @@ UNIFIED_MODELS_DIR=<actual unified model directory>
 The long-term owner should be `local-ai-config.sh` or `deploy-runtime.sh`. For the first test, write the marker manually:
 
 ```bash
-./scripts/write-active-model.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser' nighttime
+./scripts/write-active-model.sh 'qwen3.8-27b-uncensored:night' nighttime medium \
+  runtime/reasoning-capabilities.night.example.json
 ```
 
 The marker lands at:

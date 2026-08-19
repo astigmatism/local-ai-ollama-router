@@ -47,8 +47,8 @@ test('parses optional cross-protocol thinking defaults without changing endpoint
 
   const configured = loadConfig({ DEFAULT_THINK: 'xhigh' });
   assert.equal(configured.defaultThinkConfigured, true);
-  assert.equal(configured.defaultThink, 'max');
-  assert.equal(publicConfig(configured).defaultThink, 'max');
+  assert.equal(configured.defaultThink, 'xhigh');
+  assert.equal(publicConfig(configured).defaultThink, 'xhigh');
 
   const modelDefault = loadConfig({ DEFAULT_THINK: 'model-default' });
   assert.equal(modelDefault.defaultThinkConfigured, true);

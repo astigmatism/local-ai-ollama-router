@@ -7,6 +7,30 @@ import path from 'node:path';
 import { loadConfig } from '../src/config.js';
 import { createRouterServer } from '../src/server.js';
 
+const DAY_REASONING_CAPABILITIES = {
+  supported_think_levels: ['low', 'medium', 'high', 'max'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'max',
+    max: 'max'
+  }
+};
+
+const NIGHT_REASONING_CAPABILITIES = {
+  supported_think_levels: ['low', 'medium', 'xhigh'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'xhigh',
+    xhigh: 'xhigh',
+    max: 'xhigh'
+  }
+};
+
 async function readJsonBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -90,7 +114,7 @@ async function close(server) {
   await closed;
 }
 
-async function makeFixture(overrides = {}, upstreamOptions = {}) {
+async function makeFixture(overrides = {}, upstreamOptions = {}, markerOverrides = {}) {
   const upstream = createFakeOllama(upstreamOptions);
   const upstreamPort = await listen(upstream.server);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-server-test-'));
@@ -100,8 +124,10 @@ async function makeFixture(overrides = {}, upstreamOptions = {}) {
     model: 'active:model',
     keep_alive: -1,
     context: 8192,
+    ...DAY_REASONING_CAPABILITIES,
     updated_at: '2026-06-29T00:00:00.000Z',
-    source: 'server.test.js'
+    source: 'server.test.js',
+    ...markerOverrides
   }), 'utf8');
 
   const config = {
@@ -320,6 +346,114 @@ test('API chat preserves model-default behavior when no router default is config
     assert.equal(response.status, 200);
     const chat = fixture.upstream.requests.find((item) => item.pathname === '/api/chat');
     assert.equal(Object.hasOwn(chat.body, 'think'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('native chat and generate negotiate string levels through day and night profiles', async () => {
+  const cases = [
+    {
+      profile: DAY_REASONING_CAPABILITIES,
+      requests: [
+        ['/api/chat', 'xhigh', false, 'max'],
+        ['/api/generate', 'max', true, 'max'],
+        ['/api/chat', 'low', false, 'low'],
+        ['/api/generate', 'medium', true, 'medium']
+      ]
+    },
+    {
+      profile: NIGHT_REASONING_CAPABILITIES,
+      requests: [
+        ['/api/chat', 'max', false, 'xhigh'],
+        ['/api/generate', 'xhigh', true, 'xhigh']
+      ]
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = await makeFixture({}, { capabilities: ['completion', 'thinking'] }, item.profile);
+    try {
+      for (const [endpoint, effort, stream] of item.requests) {
+        const body = endpoint === '/api/chat'
+          ? { model: 'active:model', think: effort, stream, messages: [{ role: 'user', content: effort }] }
+          : { model: 'active:model', think: effort, stream, prompt: effort };
+        const response = await fetch(`http://127.0.0.1:${fixture.apiPort}${endpoint}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        assert.equal(response.status, 200);
+        await response.text();
+      }
+
+      const generated = fixture.upstream.requests.filter((request) => ['/api/chat', '/api/generate'].includes(request.pathname));
+      assert.deepEqual(generated.map((request) => request.body.think), item.requests.map((request) => request[3]));
+      const records = fixture.context.store.recentRequests(item.requests.length).reverse();
+      assert.deepEqual(records.map((record) => record.incomingReasoningEffort), item.requests.map((request) => request[1]));
+      assert.deepEqual(records.map((record) => record.forwardedThink), item.requests.map((request) => request[3]));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test('native generation rejects incomplete profiles and invalid think strings before Ollama generation', async () => {
+  const cases = [
+    {
+      marker: { reasoning_effort_map: undefined },
+      think: 'max',
+      status: 503,
+      code: 'INVALID_REASONING_CAPABILITIES'
+    },
+    {
+      marker: DAY_REASONING_CAPABILITIES,
+      think: 'turbo',
+      status: 400,
+      code: 'INVALID_THINK_VALUE'
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = await makeFixture({}, { capabilities: ['completion', 'thinking'] }, item.marker);
+    try {
+      const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'active:model', prompt: 'hello', stream: false, think: item.think })
+      });
+      assert.equal(response.status, item.status);
+      assert.equal((await response.json()).error.code, item.code);
+      assert.equal(fixture.upstream.requests.some((request) => request.pathname === '/api/generate'), false);
+      assert.equal(fixture.upstream.requests.some((request) => request.pathname === '/api/show'), false);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test('native boolean think values remain usable without string-level metadata', async () => {
+  const fixture = await makeFixture(
+    {},
+    { capabilities: ['completion', 'thinking'] },
+    { supported_think_levels: undefined, reasoning_effort_map: undefined }
+  );
+  try {
+    for (const think of [true, false]) {
+      const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'active:model',
+          stream: false,
+          think,
+          messages: [{ role: 'user', content: String(think) }]
+        })
+      });
+      assert.equal(response.status, 200);
+    }
+    const chats = fixture.upstream.requests.filter((request) => request.pathname === '/api/chat');
+    assert.deepEqual(chats.map((request) => request.body.think), [true, false]);
   } finally {
     await fixture.cleanup();
   }

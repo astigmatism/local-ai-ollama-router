@@ -5,8 +5,33 @@ import {
   parseDefaultThink,
   reasoningEffortToThink,
   resolveDefaultThink,
-  thinkLevelToReasoningEffort
+  thinkLevelToReasoningEffort,
+  validateReasoningCapabilities
 } from '../src/reasoning.js';
+
+const DAY_REASONING = {
+  supported_think_levels: ['low', 'medium', 'high', 'max'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'high',
+    xhigh: 'max',
+    max: 'max'
+  }
+};
+
+const NIGHT_REASONING = {
+  supported_think_levels: ['low', 'medium', 'xhigh'],
+  reasoning_effort_map: {
+    minimal: 'low',
+    low: 'low',
+    medium: 'medium',
+    high: 'xhigh',
+    xhigh: 'xhigh',
+    max: 'xhigh'
+  }
+};
 
 test('maps Ollama think values back to generic reasoning efforts', () => {
   assert.equal(thinkLevelToReasoningEffort(true), 'high');
@@ -23,21 +48,41 @@ test('maps Ollama think values back to generic reasoning efforts', () => {
 
 test('maps generic reasoning efforts to Ollama think values', () => {
   assert.equal(reasoningEffortToThink('none'), false);
-  assert.equal(reasoningEffortToThink('minimal'), 'low');
-  assert.equal(reasoningEffortToThink('low'), 'low');
-  assert.equal(reasoningEffortToThink('medium'), 'medium');
-  assert.equal(reasoningEffortToThink('high'), 'high');
-  assert.equal(reasoningEffortToThink('xhigh'), 'max');
-  assert.equal(reasoningEffortToThink('max'), 'max');
+  assert.equal(reasoningEffortToThink('minimal', DAY_REASONING), 'low');
+  assert.equal(reasoningEffortToThink('low', DAY_REASONING), 'low');
+  assert.equal(reasoningEffortToThink('medium', DAY_REASONING), 'medium');
+  assert.equal(reasoningEffortToThink('high', DAY_REASONING), 'high');
+  assert.equal(reasoningEffortToThink('xhigh', DAY_REASONING), 'max');
+  assert.equal(reasoningEffortToThink('max', DAY_REASONING), 'max');
+  assert.equal(reasoningEffortToThink('xhigh', NIGHT_REASONING), 'xhigh');
+  assert.equal(reasoningEffortToThink('max', NIGHT_REASONING), 'xhigh');
   assert.equal(reasoningEffortToThink('invalid'), undefined);
+});
+
+test('rejects missing, incomplete, and internally inconsistent reasoning profiles', () => {
+  assert.throws(
+    () => reasoningEffortToThink('high'),
+    (error) => error.code === 'MISSING_REASONING_CAPABILITIES'
+  );
+  assert.throws(
+    () => validateReasoningCapabilities({ supported_think_levels: ['low'] }),
+    (error) => error.code === 'INVALID_REASONING_CAPABILITIES'
+  );
+  assert.throws(
+    () => validateReasoningCapabilities({
+      ...DAY_REASONING,
+      reasoning_effort_map: { ...DAY_REASONING.reasoning_effort_map, max: 'xhigh' }
+    }),
+    (error) => error.code === 'INVALID_REASONING_CAPABILITIES'
+  );
 });
 
 test('parses boolean, level, compatibility, and model-default settings', () => {
   assert.equal(parseDefaultThink(true), true);
   assert.equal(parseDefaultThink('false'), false);
   assert.equal(parseDefaultThink('none'), false);
-  assert.equal(parseDefaultThink('minimal'), 'low');
-  assert.equal(parseDefaultThink('xhigh'), 'max');
+  assert.equal(parseDefaultThink('minimal'), 'minimal');
+  assert.equal(parseDefaultThink('xhigh'), 'xhigh');
   assert.equal(parseDefaultThink('max'), 'max');
   assert.equal(parseDefaultThink('model-default'), undefined);
   assert.throws(() => parseDefaultThink('turbo'), /thinking default/);
@@ -45,7 +90,7 @@ test('parses boolean, level, compatibility, and model-default settings', () => {
 
 test('resolves active-model defaults before global defaults and endpoint fallbacks', () => {
   const config = { defaultThinkConfigured: true, defaultThink: 'medium' };
-  assert.equal(resolveDefaultThink({ default_think_configured: true, default_think: 'xhigh' }, config, false), 'max');
+  assert.equal(resolveDefaultThink({ default_think_configured: true, default_think: 'xhigh' }, config, false), 'xhigh');
   assert.equal(resolveDefaultThink({ default_think_configured: false }, config, false), 'medium');
   assert.equal(resolveDefaultThink({ default_think_configured: false }, { defaultThinkConfigured: false }, false), false);
   assert.equal(resolveDefaultThink({ default_think_configured: false }, { defaultThinkConfigured: false }), undefined);

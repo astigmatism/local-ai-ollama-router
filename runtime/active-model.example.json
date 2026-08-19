@@ -1,7 +1,16 @@
 {
   "profile": "nighttime",
-  "model": "hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser",
+  "model": "qwen3.8-27b-uncensored:night",
   "keep_alive": -1,
+  "supported_think_levels": ["low", "medium", "xhigh"],
+  "reasoning_effort_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "xhigh",
+    "xhigh": "xhigh",
+    "max": "xhigh"
+  },
   "updated_at": "2026-06-29T00:00:00-07:00",
   "source": "example marker; deployment should write runtime/active-model.json"
 }

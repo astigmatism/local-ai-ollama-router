@@ -353,6 +353,8 @@ async function handleProxy(request, response, url, context) {
     body: policy.sanitizedBody,
     incomingThink: policy.sanitizedBody?.think,
     forwardedThink: policy.sanitizedBody?.think,
+    thinkMapped: false,
+    thinkDropped: false,
     thinkNormalized: false,
     thinkingSupported: null
   };
@@ -368,7 +370,10 @@ async function handleProxy(request, response, url, context) {
     forwardedKeepAlive: policy.forwardedKeepAlive,
     keepAliveNormalized: Boolean(policy.keepAliveNormalized),
     incomingThink: thinkPolicy.incomingThink,
-    forwardedThink: thinkPolicy.forwardedThink,
+    forwardedThink: undefined,
+    incomingReasoningEffort: thinkLevelToReasoningEffort(policy.sanitizedBody?.think) ?? null,
+    thinkMapped: thinkPolicy.thinkMapped,
+    thinkDropped: thinkPolicy.thinkDropped,
     thinkNormalized: thinkPolicy.thinkNormalized,
     thinkingSupported: thinkPolicy.thinkingSupported,
     reasoningEffort: thinkLevelToReasoningEffort(thinkPolicy.forwardedThink ?? thinkPolicy.incomingThink),
@@ -394,25 +399,40 @@ async function handleProxy(request, response, url, context) {
       && typeof bodyWithThinkDefault === 'object'
       && !Array.isArray(bodyWithThinkDefault)
       && !Object.hasOwn(bodyWithThinkDefault, 'think');
-    if (canApplyThinkDefault) {
-      let defaultThink;
-      try {
+    try {
+      if (canApplyThinkDefault) {
+        let defaultThink;
         defaultThink = resolveDefaultThink(activeModel, context.config);
-      } catch (error) {
-        await rejectProxyRequest(response, context, commonRecord, 503, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT', error.message, {
+        if (defaultThink !== undefined) bodyWithThinkDefault = { ...bodyWithThinkDefault, think: defaultThink };
+      }
+      thinkPolicy = await normalizeThinkForModel(
+        context.config,
+        policy.forwardedModel,
+        bodyWithThinkDefault,
+        policy.forwardedModel === activeModel.model ? activeModel : null
+      );
+    } catch (error) {
+      await rejectProxyRequest(
+        response,
+        context,
+        commonRecord,
+        error.statusCode || 503,
+        error.code || 'INVALID_ACTIVE_MODEL_THINK_DEFAULT',
+        error.message,
+        {
           activeModel: policy.activeModel,
           requestedModel: policy.requestedModel,
           forwardedModel: policy.forwardedModel
-        });
-        return;
-      }
-      if (defaultThink !== undefined) bodyWithThinkDefault = { ...bodyWithThinkDefault, think: defaultThink };
+        }
+      );
+      return;
     }
-    thinkPolicy = await normalizeThinkForModel(context.config, policy.forwardedModel, bodyWithThinkDefault);
     sanitizedBody = thinkPolicy.body;
     Object.assign(commonRecord, {
       incomingThink: thinkPolicy.incomingThink,
       forwardedThink: thinkPolicy.forwardedThink,
+      thinkMapped: thinkPolicy.thinkMapped,
+      thinkDropped: thinkPolicy.thinkDropped,
       thinkNormalized: thinkPolicy.thinkNormalized,
       thinkingSupported: thinkPolicy.thinkingSupported,
       reasoningEffort: thinkLevelToReasoningEffort(thinkPolicy.forwardedThink ?? thinkPolicy.incomingThink),
@@ -448,13 +468,27 @@ async function handleProxy(request, response, url, context) {
     });
   }
 
-  if (thinkPolicy.thinkNormalized) {
+  if (thinkPolicy.thinkDropped) {
     await persistEvent(context.store, {
       type: 'unsupported_thinking_dropped',
       endpoint: pathname,
       method: request.method,
       model: policy.forwardedModel,
       incomingThink: thinkPolicy.incomingThink,
+      clientIdentity: commonRecord.clientIdentity,
+      sourceIp: commonRecord.sourceIp
+    });
+  }
+
+  if (thinkPolicy.thinkMapped && !thinkPolicy.thinkDropped) {
+    await persistEvent(context.store, {
+      type: 'think_level_mapped',
+      endpoint: pathname,
+      method: request.method,
+      model: policy.forwardedModel,
+      incomingReasoningEffort: commonRecord.incomingReasoningEffort,
+      incomingThink: thinkPolicy.incomingThink,
+      forwardedThink: thinkPolicy.forwardedThink,
       clientIdentity: commonRecord.clientIdentity,
       sourceIp: commonRecord.sourceIp
     });
@@ -589,13 +623,27 @@ async function handleResponses(request, response, url, context) {
     });
   }
 
-  if (outcome.thinkNormalized) {
+  if (outcome.thinkDropped) {
     await persistEvent(context.store, {
       type: 'unsupported_thinking_dropped',
       endpoint: url.pathname,
       method: request.method,
       model: outcome.forwardedModel,
       incomingThink: outcome.incomingThink,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  }
+
+  if (outcome.thinkMapped && !outcome.thinkDropped) {
+    await persistEvent(context.store, {
+      type: 'think_level_mapped',
+      endpoint: url.pathname,
+      method: request.method,
+      model: outcome.forwardedModel,
+      incomingReasoningEffort: outcome.incomingReasoningEffort,
+      incomingThink: outcome.incomingThink,
+      forwardedThink: outcome.forwardedThink,
       clientIdentity: record.clientIdentity,
       sourceIp: record.sourceIp
     });
