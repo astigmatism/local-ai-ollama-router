@@ -57,14 +57,14 @@ Marker format:
   "profile": "nighttime",
   "model": "qwen3.8-27b-uncensored:night",
   "keep_alive": -1,
-  "supported_think_levels": ["low", "medium", "xhigh"],
+  "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
     "low": "low",
     "medium": "medium",
-    "high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "xhigh"
+    "high": true,
+    "xhigh": true,
+    "max": true
   },
   "updated_at": "2026-06-29T00:00:00-07:00",
   "source": "local-ai-config.sh apply nighttime"
@@ -73,9 +73,9 @@ Marker format:
 
 The dashboard also displays optional context hints if the marker includes fields such as `context`, `num_ctx`, `numCtx`, or `options.num_ctx`.
 
-Reasoning capability metadata belongs to the active deployment profile; the router does not infer it from `model` or `profile` names. `supported_think_levels` and `reasoning_effort_map` must appear together. The map must define `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and every target must be listed in `supported_think_levels`. `none` is not part of the map because it always becomes boolean `false`. Invalid/incomplete profiles fail generation with HTTP 503 before an upstream generation request.
+Reasoning capability metadata belongs to the active deployment profile; the router does not infer it from `model` or `profile` names. `supported_think_levels` and `reasoning_effort_map` must appear together. The map must define `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A string target must be listed in `supported_think_levels`; boolean `true` selects the model/runtime's enabled default reasoning mode and need not be listed. No other boolean target is valid. `none` is not part of the map because it always becomes boolean `false`. Invalid/incomplete profiles fail generation with HTTP 503 before an upstream generation request.
 
-For manual marker updates, `scripts/write-active-model.sh` accepts a capability JSON file as its fourth argument. `runtime/reasoning-capabilities.day.example.json` preserves the historical `xhigh`/`max` → `max` behavior, while `runtime/reasoning-capabilities.night.example.json` maps both efforts to `xhigh`.
+For manual marker updates, `scripts/write-active-model.sh` accepts a capability JSON file as its fourth argument. `runtime/reasoning-capabilities.day.example.json` preserves the historical `xhigh`/`max` → `"max"` behavior, while `runtime/reasoning-capabilities.night.example.json` maps `high`/`xhigh`/`max` to boolean `true`.
 
 ## Policy
 

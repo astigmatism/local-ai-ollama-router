@@ -81,14 +81,14 @@ Example marker:
   "model": "qwen3.8-27b-uncensored:night",
   "keep_alive": -1,
   "default_think": "medium",
-  "supported_think_levels": ["low", "medium", "xhigh"],
+  "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
     "low": "low",
     "medium": "medium",
-    "high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "xhigh"
+    "high": true,
+    "xhigh": true,
+    "max": true
   },
   "updated_at": "2026-06-29T00:00:00-07:00",
   "source": "local-ai-config.sh apply nighttime"
@@ -101,7 +101,7 @@ Example marker:
 
 `default_think` is optional. It can be `true`, `false`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `model-default`, and applies only while that marker's model is active. String defaults are negotiated through the marker's capability map.
 
-`supported_think_levels` and `reasoning_effort_map` are model/profile-specific. They must be supplied together, and every mapped value must appear in `supported_think_levels`. A daytime model that accepts `max` can retain the historical behavior with a separate profile:
+`supported_think_levels` and `reasoning_effort_map` are model/profile-specific. They must be supplied together. Each map target must either be a declared string level or boolean `true`, which asks Ollama to use the model template's enabled default reasoning mode. A daytime model that accepts `max` can retain the historical behavior with a separate profile:
 
 ```json
 {
@@ -135,7 +135,7 @@ For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/em
 
 Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving other request parameters. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
 
-Native `/api/chat` and `/api/generate` requests may set `think` to a boolean or a reasoning effort string. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias. `none` always maps to `false`; every string level is mapped by the active profile, so the same incoming `max` can become `xhigh` at night and remain `max` during the day. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think`, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
+Native `/api/chat` and `/api/generate` requests may set `think` to a boolean or a reasoning effort string. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias. `none` always maps to `false`; every string effort is mapped by the active profile, so the same incoming `max` can become boolean `true` at night and remain the string `"max"` during the day. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think`, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
 
 Ollama's advertised `thinking` capability remains the binary enabled/disabled check; the profile metadata supplies the missing list of valid string levels. Missing metadata rejects string reasoning with HTTP 503, and invalid or incomplete metadata rejects generation before Ollama is called. No model names are used to infer support.
 
@@ -162,7 +162,7 @@ requires_openai_auth = false
 
 `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models`; configure the active model explicitly in Codex.
 
-Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: "xhigh"` for the nighttime profile and `think: "max"` for the daytime profile above.
+Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: true` for the nighttime profile and `think: "max"` for the daytime profile above.
 
 The endpoint is stateless: omit `store` or send `store: false`, resend prior response items for tool follow-ups, and do not send `previous_response_id`. See `docs/API.md` for supported fields, item types, curl examples, and error behavior.
 

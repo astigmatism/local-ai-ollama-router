@@ -25,14 +25,14 @@ const DAY_REASONING_CAPABILITIES = {
 };
 
 const NIGHT_REASONING_CAPABILITIES = {
-  supported_think_levels: ['low', 'medium', 'xhigh'],
+  supported_think_levels: ['low', 'medium'],
   reasoning_effort_map: {
     minimal: 'low',
     low: 'low',
     medium: 'medium',
-    high: 'xhigh',
-    xhigh: 'xhigh',
-    max: 'xhigh'
+    high: true,
+    xhigh: true,
+    max: true
   }
 };
 
@@ -56,7 +56,7 @@ function lastUserText(body) {
   return [...(body?.messages || [])].reverse().find((message) => message.role === 'user')?.content || '';
 }
 
-function createFakeOllama({ capabilities = ['completion'] } = {}) {
+function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = false } = {}) {
   const requests = [];
   const state = { upstreamClosed: false };
   const server = http.createServer(async (request, response) => {
@@ -74,6 +74,17 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
     }
     if (request.method !== 'POST' || url.pathname !== '/api/chat') {
       sendJson(response, 404, { error: 'not found' });
+      return;
+    }
+    if (
+      enforceThinkValues
+      && Object.hasOwn(body || {}, 'think')
+      && typeof body.think !== 'boolean'
+      && !['low', 'medium', 'high', 'max'].includes(body.think)
+    ) {
+      sendJson(response, 400, {
+        error: `invalid think value: ${JSON.stringify(body.think)} (must be "high", "medium", "low", "max", true, or false)`
+      });
       return;
     }
 
@@ -123,7 +134,11 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
       }
       sendJson(response, 200, {
         model: body.model,
-        message: { role: 'assistant', content: 'hello from ollama' },
+        message: {
+          role: 'assistant',
+          ...(body.think === true ? { thinking: 'reasoning from ollama' } : {}),
+          content: 'hello from ollama'
+        },
         done: true,
         prompt_eval_count: 3,
         eval_count: 4,
@@ -192,6 +207,9 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
       }, 500);
       return;
     }
+    if (body.think === true) {
+      response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', thinking: 'reasoning from ollama', content: '' }, done: false })}\n`);
+    }
     response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'hello ' }, done: false })}\n`);
     response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'stream' }, done: false })}\n`);
     response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, prompt_eval_count: 8, eval_count: 3 })}\n`);
@@ -211,8 +229,14 @@ async function close(server) {
   await closed;
 }
 
-async function makeFixture({ env = {}, configOverrides = {}, marker = true, capabilities = ['completion'] } = {}) {
-  const upstream = createFakeOllama({ capabilities });
+async function makeFixture({
+  env = {},
+  configOverrides = {},
+  marker = true,
+  capabilities = ['completion'],
+  enforceThinkValues = false
+} = {}) {
+  const upstream = createFakeOllama({ capabilities, enforceThinkValues });
   const upstreamPort = await listen(upstream.server);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'responses-api-test-'));
   const activeModelFile = path.join(dir, 'active-model.json');
@@ -785,11 +809,12 @@ test('Responses negotiates day and night efforts for streaming, non-streaming, a
     {
       marker: { ...NIGHT_REASONING_CAPABILITIES, default_think: 'max' },
       requests: [
-        [{ input: 'night max', reasoning: { effort: 'max' }, stream: false }, 'max', 'xhigh'],
-        [{ input: 'night xhigh', reasoning_effort: 'xhigh', stream: true }, 'xhigh', 'xhigh'],
+        [{ input: 'night max', reasoning: { effort: 'max' }, stream: false }, 'max', true],
+        [{ input: 'night xhigh', reasoning_effort: 'xhigh', stream: true }, 'xhigh', true],
+        [{ input: 'night high', reasoning: { effort: 'high' }, stream: false }, 'high', true],
         [{ input: 'night low', reasoning: { effort: 'low' }, stream: false }, 'low', 'low'],
         [{ input: 'night medium', reasoning: { effort: 'medium' }, stream: true }, 'medium', 'medium'],
-        [{ input: 'night default', stream: false }, null, 'xhigh']
+        [{ input: 'night default', stream: false }, null, true]
       ]
     },
     {
@@ -802,7 +827,11 @@ test('Responses negotiates day and night efforts for streaming, non-streaming, a
   ];
 
   for (const profile of profiles) {
-    const fixture = await makeFixture({ marker: profile.marker, capabilities: ['completion', 'thinking'] });
+    const fixture = await makeFixture({
+      marker: profile.marker,
+      capabilities: ['completion', 'thinking'],
+      enforceThinkValues: true
+    });
     try {
       for (const [body] of profile.requests) {
         const response = await postResponses(fixture, body);
@@ -816,9 +845,60 @@ test('Responses negotiates day and night efforts for streaming, non-streaming, a
       assert.deepEqual(records.map((record) => record.incomingReasoningEffort), profile.requests.map((request) => request[1]));
       assert.deepEqual(records.map((record) => record.forwardedThink), profile.requests.map((request) => request[2]));
       assert.deepEqual(records.map((record) => record.streaming), profile.requests.map((request) => request[0].stream));
+      if (profile.marker.default_think === 'max') {
+        assert.deepEqual(records.map((record) => record.thinkMapped), [true, true, true, false, false, true]);
+      }
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+test('Responses nighttime max and xhigh pass strict Ollama think validation with visible reasoning and answers', async () => {
+  const fixture = await makeFixture({
+    marker: NIGHT_REASONING_CAPABILITIES,
+    capabilities: ['completion', 'thinking'],
+    enforceThinkValues: true
+  });
+  try {
+    const nonStreaming = await postResponses(fixture, {
+      input: 'strict non-stream',
+      reasoning: { effort: 'max' },
+      stream: false
+    });
+    assert.equal(nonStreaming.status, 200);
+    const nonStreamingPayload = await nonStreaming.json();
+    assert.deepEqual(nonStreamingPayload.output.map((item) => item.type), ['reasoning', 'message']);
+    assert.equal(nonStreamingPayload.output[0].content[0].text, 'reasoning from ollama');
+    assert.equal(nonStreamingPayload.output[1].content[0].text, 'hello from ollama');
+
+    const streaming = await postResponses(fixture, {
+      input: 'strict stream',
+      reasoning_effort: 'xhigh',
+      stream: true
+    });
+    assert.equal(streaming.status, 200);
+    const streamEvents = parseSse(await streaming.text());
+    assert.deepEqual(
+      streamEvents.filter((event) => event.type === 'response.reasoning_text.delta').map((event) => event.delta),
+      ['reasoning from ollama']
+    );
+    assert.deepEqual(
+      streamEvents.filter((event) => event.type === 'response.output_text.delta').map((event) => event.delta),
+      ['hello ', 'stream']
+    );
+    assert.equal(streamEvents.at(-1).type, 'response.completed');
+
+    const chats = fixture.upstream.requests.filter((request) => request.pathname === '/api/chat');
+    assert.deepEqual(chats.map((request) => request.body.think), [true, true]);
+    assert.deepEqual(chats.map((request) => request.body.keep_alive), [-1, -1]);
+    const records = fixture.context.store.recentRequests(2).reverse();
+    assert.deepEqual(records.map((record) => record.incomingReasoningEffort), ['max', 'xhigh']);
+    assert.deepEqual(records.map((record) => record.forwardedThink), [true, true]);
+    assert.deepEqual(records.map((record) => record.thinkMapped), [true, true]);
+    assert.deepEqual(records.map((record) => record.upstreamError), [false, false]);
+  } finally {
+    await fixture.cleanup();
   }
 });
 
@@ -839,6 +919,19 @@ test('Responses rejects missing, incomplete, and inconsistent capability profile
         reasoning_effort_map: { ...DAY_REASONING_CAPABILITIES.reasoning_effort_map, max: 'xhigh' }
       },
       request: { input: 'inconsistent', reasoning: { effort: 'max' } },
+      code: 'INVALID_REASONING_CAPABILITIES'
+    },
+    {
+      marker: { ...NIGHT_REASONING_CAPABILITIES, supported_think_levels: ['low', 1] },
+      request: { input: 'malformed levels', reasoning: { effort: 'medium' } },
+      code: 'INVALID_REASONING_CAPABILITIES'
+    },
+    {
+      marker: {
+        ...NIGHT_REASONING_CAPABILITIES,
+        reasoning_effort_map: { ...NIGHT_REASONING_CAPABILITIES.reasoning_effort_map, high: false }
+      },
+      request: { input: 'invalid false target', reasoning: { effort: 'high' } },
       code: 'INVALID_REASONING_CAPABILITIES'
     }
   ];

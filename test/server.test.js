@@ -20,14 +20,14 @@ const DAY_REASONING_CAPABILITIES = {
 };
 
 const NIGHT_REASONING_CAPABILITIES = {
-  supported_think_levels: ['low', 'medium', 'xhigh'],
+  supported_think_levels: ['low', 'medium'],
   reasoning_effort_map: {
     minimal: 'low',
     low: 'low',
     medium: 'medium',
-    high: 'xhigh',
-    xhigh: 'xhigh',
-    max: 'xhigh'
+    high: true,
+    xhigh: true,
+    max: true
   }
 };
 
@@ -47,7 +47,7 @@ function sendJson(response, status, body) {
   response.end(payload);
 }
 
-function createFakeOllama({ capabilities = ['completion'] } = {}) {
+function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = false } = {}) {
   const requests = [];
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://fake-ollama.local');
@@ -65,6 +65,19 @@ function createFakeOllama({ capabilities = ['completion'] } = {}) {
     if (request.method === 'GET' && url.pathname === '/api/ps') {
       sendJson(response, 200, {
         models: [{ name: 'active:model', model: 'active:model', until: 'Forever', context: 8192 }]
+      });
+      return;
+    }
+    if (
+      enforceThinkValues
+      && request.method === 'POST'
+      && ['/api/chat', '/api/generate'].includes(url.pathname)
+      && Object.hasOwn(body || {}, 'think')
+      && typeof body.think !== 'boolean'
+      && !['low', 'medium', 'high', 'max'].includes(body.think)
+    ) {
+      sendJson(response, 400, {
+        error: `invalid think value: ${JSON.stringify(body.think)} (must be "high", "medium", "low", "max", true, or false)`
       });
       return;
     }
@@ -365,14 +378,21 @@ test('native chat and generate negotiate string levels through day and night pro
     {
       profile: NIGHT_REASONING_CAPABILITIES,
       requests: [
-        ['/api/chat', 'max', false, 'xhigh'],
-        ['/api/generate', 'xhigh', true, 'xhigh']
+        ['/api/chat', 'high', false, true],
+        ['/api/generate', 'max', true, true],
+        ['/api/chat', 'xhigh', true, true],
+        ['/api/generate', 'low', false, 'low'],
+        ['/api/chat', 'medium', false, 'medium']
       ]
     }
   ];
 
   for (const item of cases) {
-    const fixture = await makeFixture({}, { capabilities: ['completion', 'thinking'] }, item.profile);
+    const fixture = await makeFixture(
+      {},
+      { capabilities: ['completion', 'thinking'], enforceThinkValues: true },
+      item.profile
+    );
     try {
       for (const [endpoint, effort, stream] of item.requests) {
         const body = endpoint === '/api/chat'
@@ -389,12 +409,46 @@ test('native chat and generate negotiate string levels through day and night pro
 
       const generated = fixture.upstream.requests.filter((request) => ['/api/chat', '/api/generate'].includes(request.pathname));
       assert.deepEqual(generated.map((request) => request.body.think), item.requests.map((request) => request[3]));
+      assert.deepEqual(generated.map((request) => request.body.keep_alive), item.requests.map(() => -1));
       const records = fixture.context.store.recentRequests(item.requests.length).reverse();
       assert.deepEqual(records.map((record) => record.incomingReasoningEffort), item.requests.map((request) => request[1]));
       assert.deepEqual(records.map((record) => record.forwardedThink), item.requests.map((request) => request[3]));
+      if (item.profile === NIGHT_REASONING_CAPABILITIES) {
+        assert.deepEqual(records.slice(0, 3).map((record) => record.thinkMapped), [true, true, true]);
+      }
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+test('native chat and generate map an omitted nighttime default through the profile', async () => {
+  const fixture = await makeFixture(
+    {},
+    { capabilities: ['completion', 'thinking'], enforceThinkValues: true },
+    { ...NIGHT_REASONING_CAPABILITIES, default_think: 'max' }
+  );
+  try {
+    for (const [endpoint, content] of [['/api/chat', 'default chat'], ['/api/generate', 'default generate']]) {
+      const body = endpoint === '/api/chat'
+        ? { model: 'active:model', stream: false, messages: [{ role: 'user', content }] }
+        : { model: 'active:model', stream: false, prompt: content };
+      const response = await fetch(`http://127.0.0.1:${fixture.apiPort}${endpoint}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      assert.equal(response.status, 200);
+    }
+
+    const generated = fixture.upstream.requests.filter((request) => ['/api/chat', '/api/generate'].includes(request.pathname));
+    assert.deepEqual(generated.map((request) => request.body.think), [true, true]);
+    assert.deepEqual(generated.map((request) => request.body.keep_alive), [-1, -1]);
+    const records = fixture.context.store.recentRequests(2).reverse();
+    assert.deepEqual(records.map((record) => record.forwardedThink), [true, true]);
+    assert.deepEqual(records.map((record) => record.thinkMapped), [true, true]);
+  } finally {
+    await fixture.cleanup();
   }
 });
 
@@ -411,6 +465,21 @@ test('native generation rejects incomplete profiles and invalid think strings be
       think: 'turbo',
       status: 400,
       code: 'INVALID_THINK_VALUE'
+    },
+    {
+      marker: { ...NIGHT_REASONING_CAPABILITIES, supported_think_levels: 'low,medium' },
+      think: 'max',
+      status: 503,
+      code: 'INVALID_REASONING_CAPABILITIES'
+    },
+    {
+      marker: {
+        ...NIGHT_REASONING_CAPABILITIES,
+        reasoning_effort_map: { ...NIGHT_REASONING_CAPABILITIES.reasoning_effort_map, max: false }
+      },
+      think: 'max',
+      status: 503,
+      code: 'INVALID_REASONING_CAPABILITIES'
     }
   ];
 
@@ -432,14 +501,14 @@ test('native generation rejects incomplete profiles and invalid think strings be
   }
 });
 
-test('native boolean think values remain usable without string-level metadata', async () => {
+test('native boolean and none think values remain usable without string-level metadata', async () => {
   const fixture = await makeFixture(
     {},
-    { capabilities: ['completion', 'thinking'] },
+    { capabilities: ['completion', 'thinking'], enforceThinkValues: true },
     { supported_think_levels: undefined, reasoning_effort_map: undefined }
   );
   try {
-    for (const think of [true, false]) {
+    for (const think of [true, false, 'none']) {
       const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -453,7 +522,7 @@ test('native boolean think values remain usable without string-level metadata', 
       assert.equal(response.status, 200);
     }
     const chats = fixture.upstream.requests.filter((request) => request.pathname === '/api/chat');
-    assert.deepEqual(chats.map((request) => request.body.think), [true, false]);
+    assert.deepEqual(chats.map((request) => request.body.think), [true, false, false]);
   } finally {
     await fixture.cleanup();
   }

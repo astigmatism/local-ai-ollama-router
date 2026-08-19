@@ -101,11 +101,11 @@ export function validateReasoningCapabilities(profile, { required = false } = {}
     }
   }
   for (const effort of MAPPED_REASONING_EFFORTS) {
-    const level = effortMap[effort];
-    if (typeof level !== 'string' || !uniqueLevels.has(level)) {
+    const target = effortMap[effort];
+    if (target !== true && (typeof target !== 'string' || !uniqueLevels.has(target))) {
       throw new ReasoningProfileError(
         'INVALID_REASONING_CAPABILITIES',
-        `reasoning_effort_map.${effort} must name a level in supported_think_levels.`
+        `reasoning_effort_map.${effort} must be true or name a level in supported_think_levels.`
       );
     }
   }

@@ -42,7 +42,7 @@ This is enforced at the router so individual clients do not need to remember or 
 
 `src/active-model.js` reads `/app/runtime/active-model.json` or falls back to `ACTIVE_MODEL`. The deployment/profile system should write the marker.
 
-The marker is also the source of truth for model-specific reasoning capabilities. `src/reasoning.js` validates `supported_think_levels` and `reasoning_effort_map`; `src/upstream.js` applies that map before the shared `/api/show` thinking-capability check. This path is used by Responses, native chat, and native generate requests.
+The marker is also the source of truth for model-specific reasoning capabilities. `src/reasoning.js` validates `supported_think_levels` and `reasoning_effort_map`, whose targets may be declared string levels or boolean `true` for the model/runtime default; `src/upstream.js` applies that map before the shared `/api/show` thinking-capability check. This path is used by Responses, native chat, and native generate requests.
 
 ### Proxy and streaming support
 

@@ -1,11 +1,11 @@
 {
-  "supported_think_levels": ["low", "medium", "xhigh"],
+  "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
     "low": "low",
     "medium": "medium",
-    "high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "xhigh"
+    "high": true,
+    "xhigh": true,
+    "max": true
   }
 }

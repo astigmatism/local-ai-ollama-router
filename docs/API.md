@@ -132,21 +132,21 @@ Ollama's `thinking` capability is binary metadata; it does not enumerate valid s
 
 ```json
 {
-  "supported_think_levels": ["low", "medium", "xhigh"],
+  "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
     "low": "low",
     "medium": "medium",
-    "high": "xhigh",
-    "xhigh": "xhigh",
-    "max": "xhigh"
+    "high": true,
+    "xhigh": true,
+    "max": true
   }
 }
 ```
 
-Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; every target must occur in `supported_think_levels`. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
+Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; each target must be boolean `true` or a string present in `supported_think_levels`. Boolean `true` selects the model/runtime's enabled default reasoning mode. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Native boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
 
-Request records log `incomingReasoningEffort` separately from `forwardedThink`, along with incoming `think`, the effective effort, and mapping/drop state. Thus a Codex request with `max` and a nighttime forward value of `xhigh` remains distinguishable in telemetry. The admin portal request history displays these in a Thinking column.
+Request records log `incomingReasoningEffort` separately from `forwardedThink`, along with incoming `think`, the effective effort, and mapping/drop state. Thus a Codex request with `max` and a nighttime forward value of boolean `true` remains distinguishable in telemetry. The admin portal request history displays these in a Thinking column.
 
 Supported input items are:
 

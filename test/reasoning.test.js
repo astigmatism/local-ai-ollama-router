@@ -22,14 +22,14 @@ const DAY_REASONING = {
 };
 
 const NIGHT_REASONING = {
-  supported_think_levels: ['low', 'medium', 'xhigh'],
+  supported_think_levels: ['low', 'medium'],
   reasoning_effort_map: {
     minimal: 'low',
     low: 'low',
     medium: 'medium',
-    high: 'xhigh',
-    xhigh: 'xhigh',
-    max: 'xhigh'
+    high: true,
+    xhigh: true,
+    max: true
   }
 };
 
@@ -54,8 +54,9 @@ test('maps generic reasoning efforts to Ollama think values', () => {
   assert.equal(reasoningEffortToThink('high', DAY_REASONING), 'high');
   assert.equal(reasoningEffortToThink('xhigh', DAY_REASONING), 'max');
   assert.equal(reasoningEffortToThink('max', DAY_REASONING), 'max');
-  assert.equal(reasoningEffortToThink('xhigh', NIGHT_REASONING), 'xhigh');
-  assert.equal(reasoningEffortToThink('max', NIGHT_REASONING), 'xhigh');
+  assert.equal(reasoningEffortToThink('high', NIGHT_REASONING), true);
+  assert.equal(reasoningEffortToThink('xhigh', NIGHT_REASONING), true);
+  assert.equal(reasoningEffortToThink('max', NIGHT_REASONING), true);
   assert.equal(reasoningEffortToThink('invalid'), undefined);
 });
 
@@ -72,6 +73,20 @@ test('rejects missing, incomplete, and internally inconsistent reasoning profile
     () => validateReasoningCapabilities({
       ...DAY_REASONING,
       reasoning_effort_map: { ...DAY_REASONING.reasoning_effort_map, max: 'xhigh' }
+    }),
+    (error) => error.code === 'INVALID_REASONING_CAPABILITIES'
+  );
+  assert.throws(
+    () => validateReasoningCapabilities({
+      ...NIGHT_REASONING,
+      reasoning_effort_map: { ...NIGHT_REASONING.reasoning_effort_map, max: false }
+    }),
+    (error) => error.code === 'INVALID_REASONING_CAPABILITIES'
+  );
+  assert.throws(
+    () => validateReasoningCapabilities({
+      ...NIGHT_REASONING,
+      reasoning_effort_map: { ...NIGHT_REASONING.reasoning_effort_map, max: null }
     }),
     (error) => error.code === 'INVALID_REASONING_CAPABILITIES'
   );

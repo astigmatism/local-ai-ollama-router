@@ -38,14 +38,14 @@ test('reads and writes an optional per-model thinking default', async () => {
 test('reads and writes model/profile-specific reasoning capabilities', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-reasoning-'));
   const file = path.join(dir, 'active-model.json');
-  const supportedThinkLevels = ['low', 'medium', 'xhigh'];
+  const supportedThinkLevels = ['low', 'medium'];
   const reasoningEffortMap = {
     minimal: 'low',
     low: 'low',
     medium: 'medium',
-    high: 'xhigh',
-    xhigh: 'xhigh',
-    max: 'xhigh'
+    high: true,
+    xhigh: true,
+    max: true
   };
   await writeActiveModelMarker(file, {
     model: 'thinking:model',
