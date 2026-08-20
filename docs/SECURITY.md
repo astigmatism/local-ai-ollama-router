@@ -17,7 +17,7 @@ Default published ports:
 
 The Ollama-compatible API remains separate from the browser portal. Requests to `/api/*` on the admin port return a router error instead of proxying to Ollama.
 
-The API listener also exposes the stateless `/v1/responses` compatibility endpoint and `/responses` alias. These routes always target the active marker model through Ollama `/api/chat`. They reject a different requested model even if legacy `/api/*` policy is permissive, and they provide no model-management operation or arbitrary upstream path.
+The API listener also exposes the stateless `/v1/responses` compatibility endpoint and `/responses` alias. These routes always target the active marker model through Ollama `/api/chat` and provide no model-management operation or arbitrary upstream path. When `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, any non-empty requested identifier is advisory and is replaced with the marker model; when false, mismatches are rejected. Neither mode lets the client select or load another installed model.
 
 ## Prompt logging
 
@@ -53,7 +53,7 @@ When enabled, they require legacy admin authorization on the Ollama-compatible A
 
 ## Fail-closed behavior
 
-The router defaults to `MODEL_POLICY_MODE=active-only`. If no active model marker exists, model-body generation requests fail closed with `NO_ACTIVE_MODEL`. `REWRITE_REQUESTED_MODEL_TO_ACTIVE` defaults to `false`; enable it only for trusted compatibility clients because it intentionally makes client-supplied model names advisory rather than authoritative.
+The router defaults to `MODEL_POLICY_MODE=active-only`. If no active model marker exists, model-body generation requests fail closed with `NO_ACTIVE_MODEL`. `REWRITE_REQUESTED_MODEL_TO_ACTIVE` defaults to `false`; enabling it makes client-supplied model names advisory while preserving the marker as the only forwarded model. Responses cannot write `active-model.json`, and the public Responses path has no pull, load, create, copy, push, delete, fallback, or switch operation. Keep `ALLOW_MODEL_MANAGEMENT=false` in production and remove direct LAN access to raw Ollama so clients cannot bypass these controls.
 
 ## Raw Ollama exposure
 

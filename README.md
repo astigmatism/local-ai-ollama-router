@@ -133,7 +133,7 @@ USE_ACTIVE_MODEL_WHEN_MISSING=false
 
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only for trusted compatibility clients, such as Open WebUI workflows whose configured base-model name should not control the deployed Ollama model. In that mode, the router rewrites `body.model` to the active model for generation/embed requests and `/api/show`, while preserving other request parameters. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` when compatibility clients such as Codex or Open WebUI should use a stable configured name without controlling the deployed Ollama model. In that mode, the router treats the requested model as advisory and forwards only the active marker model for native generation/embed requests, `/api/show`, `/v1/responses`, and `/responses`. Responses requests may omit `model` or supply any non-empty identifier. Other request parameters are preserved. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
 
 Native `/api/chat` and `/api/generate` requests may set `think` to a boolean or a reasoning effort string. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias. `none` always maps to `false`; every string effort is mapped by the active profile, so the same incoming `max` can become boolean `true` at night and remain the string `"max"` during the day. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think`, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
 
@@ -141,7 +141,7 @@ Ollama's advertised `thinking` capability remains the binary enabled/disabled ch
 
 ## Codex CLI through the Responses API
 
-The Responses adapter has its own stricter model boundary. A request may omit `model` or name the exact active marker model; any other value receives HTTP 400. This rule cannot be relaxed by `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, or `REWRITE_REQUESTED_MODEL_TO_ACTIVE`. The adapter always calls only Ollama `/api/chat` with the active model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
+The Responses adapter always calls only Ollama `/api/chat` with the active marker model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, an omitted model or any non-empty client identifier is replaced with the marker model. With the flag set to `false`, an omitted model or the exact active model is accepted and a mismatch receives HTTP 400 `MODEL_NOT_ACTIVE`. `MODEL_POLICY_MODE` and `ALLOWED_MODELS` do not broaden this boundary. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
 
 Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Because Ollama currently provides no exact reasoning-token count separate from aggregate `eval_count`, Responses with thinking report `usage: null`; non-thinking usage is unchanged.
 
@@ -149,7 +149,7 @@ Codex CLI 0.144.3 can be configured with:
 
 ```toml
 model_provider = "local_ollama_router"
-model = "<exact active model from /health>"
+model = "local-active"
 model_reasoning_effort = "none"
 web_search = "disabled"
 
@@ -160,7 +160,7 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-`web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models`; configure the active model explicitly in Codex.
+This stable identifier requires `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`; day/night marker changes then require no Codex configuration change. `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models` because the client model name is not a deployment catalog or model-selection mechanism.
 
 Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: true` for the nighttime profile and `think: "max"` for the daytime profile above.
 
@@ -212,6 +212,7 @@ Run the Responses text-and-tool-cycle smoke test without changing the active mod
 ```bash
 ROUTER_URL=http://192.168.1.21:11434 \
 ADMIN_URL=http://192.168.1.21:11435 \
+REQUESTED_MODEL=local-active \
 ./scripts/responses-smoke-test.sh
 ```
 

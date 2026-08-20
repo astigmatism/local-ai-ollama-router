@@ -85,23 +85,24 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
 
-`GET /v1/models` is intentionally not implemented. Codex should be configured with the exact active model name. A conventional OpenAI model-list response is not a compatible substitute for Codex's separate model-catalog schema.
+`GET /v1/models` is intentionally not implemented. When request-model rewriting is enabled, Codex can be configured with a stable identifier such as `local-active`; that identifier is advisory and is not an Ollama model catalog entry. A conventional OpenAI model-list response is not a compatible substitute for Codex's separate model-catalog schema.
 
-### Fixed-model rules
+### Active-model routing rules
 
 - An omitted `model` resolves to the current active-model marker.
 - The exact active model is accepted.
-- Every other model receives HTTP 400 `MODEL_NOT_ACTIVE`.
+- With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, every non-empty client model identifier is accepted and replaced with the active marker model.
+- With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`, every mismatched model receives HTTP 400 `MODEL_NOT_ACTIVE`.
 - A missing active marker receives HTTP 503 `NO_ACTIVE_MODEL`.
 - Ollama always receives the active model, the configured `FORCE_KEEP_ALIVE` value, and `shift: false` by default. `RESPONSES_CONTEXT_SHIFT=true` is an explicit opt-in to the old shifting behavior.
 - Responses requests never invoke model pull, create, copy, push, delete, fallback, or switching logic.
-- These rules are independent of the policy settings used by existing `/api/*` routes.
+- `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, and `USE_ACTIVE_MODEL_WHEN_MISSING` do not alter these Responses rules.
 
 ### Supported request fields
 
 | Field | Behavior |
 |---|---|
-| `model` | Optional; must exactly match the active model when present. |
+| `model` | Optional. In rewrite mode any non-empty identifier is advisory; in strict mode it must exactly match the active model. Ollama always receives the marker model. |
 | `input` | Required string or array of supported input items. |
 | `instructions` | Prepended as a system message without removing developer/system input. |
 | `stream` | `false` by default; `true` produces Responses SSE events. |
@@ -146,7 +147,7 @@ Ollama's `thinking` capability is binary metadata; it does not enumerate valid s
 
 Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; each target must be boolean `true` or a string present in `supported_think_levels`. Boolean `true` selects the model/runtime's enabled default reasoning mode. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Native boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
 
-Request records log `incomingReasoningEffort` separately from `forwardedThink`, along with incoming `think`, the effective effort, and mapping/drop state. Thus a Codex request with `max` and a nighttime forward value of boolean `true` remains distinguishable in telemetry. The admin portal request history displays these in a Thinking column.
+Request records log `requestedModel`, `activeModel`, `forwardedModel`, and `modelRewritten`, plus `incomingReasoningEffort` separately from `forwardedThink`, incoming `think`, the effective effort, and mapping/drop state. Thus both a stable Codex identifier rewritten to the marker and a Codex `max` effort mapped to nighttime boolean `true` remain distinguishable in telemetry. Prompt content remains governed by `PROMPT_LOGGING`; the default records metadata only.
 
 Supported input items are:
 
@@ -194,7 +195,7 @@ The stream uses `Content-Type: text/event-stream`, disables buffering, and emits
 
 ```toml
 model_provider = "local_ollama_router"
-model = "<exact active model>"
+model = "local-active"
 model_reasoning_effort = "none"
 web_search = "disabled"
 
@@ -205,11 +206,11 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-For Codex CLI 0.144.3, `/v1/models` is not required for this provider shape. `model_reasoning_effort = "none"` is recommended for deterministic local tool use; explicit supported efforts are forwarded to Ollama when reasoning is wanted. Streaming function-call `response.output_item.done` events carry the completed call that Codex executes; a later request returns the tool result as `function_call_output`.
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` for this stable-name configuration. `/v1/models` is not required for this provider shape. `model_reasoning_effort = "none"` is recommended for deterministic local tool use; explicit supported efforts are forwarded to Ollama when reasoning is wanted. Streaming function-call `response.output_item.done` events carry the completed call that Codex executes; a later request returns the tool result as `function_call_output`.
 
 ### Responses error shape
 
-Errors returned before streaming begins use the OpenAI-compatible envelope:
+Errors returned before streaming begins use the OpenAI-compatible envelope. For example, strict mode returns:
 
 ```json
 {

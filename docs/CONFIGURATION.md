@@ -83,10 +83,10 @@ For manual marker updates, `scripts/write-active-model.sh` accepts a capability 
 |---|---:|---|
 | `MODEL_POLICY_MODE` | `active-only` | `active-only`, `allowlist`, or `permissive`. |
 | `ALLOWED_MODELS` | empty | CSV of additional models for `allowlist` mode or exceptions. |
-| `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, rewrite model-bearing requests to the active model while preserving all other request fields. Intended for trusted compatibility clients such as Open WebUI workflows. |
+| `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, client model names are advisory and model-bearing requests—including `/v1/responses` and `/responses`—forward only the active marker model. Responses also accepts an omitted model. When false, Responses rejects mismatches but still accepts an exact or omitted model. |
 | `FORCE_KEEP_ALIVE` | `-1` | Forwarded keep-alive for active protected requests. |
 | `PROTECTED_MODEL_ENDPOINTS` | `/api/chat,/api/generate,/api/embed,/api/embeddings` | Endpoints receiving keep-alive rewrite. |
-| `USE_ACTIVE_MODEL_WHEN_MISSING` | `false` | When true, missing model is filled with active model. Default false for compatibility/fail-closed clarity. |
+| `USE_ACTIVE_MODEL_WHEN_MISSING` | `false` | When true, a missing model is filled for native model-body routes. Responses always resolves an omitted model from the active marker and does not consult this setting. |
 | `ALLOW_MODEL_MANAGEMENT` | `false` | Enables pull/create/copy/push/delete only with legacy admin auth when `ADMIN_TOKEN` is set. |
 
 ## Legacy admin token

@@ -4,16 +4,11 @@ set -euo pipefail
 ROUTER_URL="${ROUTER_URL:-http://192.168.1.21:11434}"
 ROUTER_URL="${ROUTER_URL%/}"
 CODEX_BIN="${CODEX_BIN:-codex}"
-ACTIVE_MODEL="${1:-}"
+REQUESTED_MODEL="${REQUESTED_MODEL:-${1:-local-active}}"
 
 command -v "$CODEX_BIN" > /dev/null
-if [[ -z "$ACTIVE_MODEL" ]]; then
-  ACTIVE_MODEL="$(curl -fsS "$ROUTER_URL/health" | jq -er '.activeModel.model | select(type == "string" and length > 0)')"
-fi
-
 BEFORE_ACTIVE="$(curl -fsS "$ROUTER_URL/health" | jq -er '.activeModel.model')"
 BEFORE_LOADED="$(curl -fsS "$ROUTER_URL/api/ps" | jq -c '[.models[]? | (.name // .model)] | sort')"
-[[ "$ACTIVE_MODEL" == "$BEFORE_ACTIVE" ]]
 
 SMOKE_OUTPUT="$(mktemp)"
 cleanup() {
@@ -34,7 +29,7 @@ trap cleanup EXIT
   --disable image_generation \
   --disable artifact \
   -c "model_provider=\"local_ollama_router\"" \
-  -c "model=\"$ACTIVE_MODEL\"" \
+  -c "model=\"$REQUESTED_MODEL\"" \
   -c 'model_reasoning_effort="none"' \
   -c 'web_search="disabled"' \
   -c 'model_providers.local_ollama_router.name="Local Ollama Router"' \
@@ -62,4 +57,5 @@ AFTER_LOADED="$(curl -fsS "$ROUTER_URL/api/ps" | jq -c '[.models[]? | (.name // 
 [[ "$AFTER_LOADED" == "$BEFORE_LOADED" ]]
 
 echo "Codex Responses smoke test passed."
+echo "Requested model remained advisory: $REQUESTED_MODEL"
 echo "Active model remained: $AFTER_ACTIVE"

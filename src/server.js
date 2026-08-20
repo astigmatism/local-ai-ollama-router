@@ -623,6 +623,19 @@ async function handleResponses(request, response, url, context) {
     });
   }
 
+  if (outcome.modelRewritten) {
+    await persistEvent(context.store, {
+      type: 'model_rewritten_to_active',
+      endpoint: url.pathname,
+      method: request.method,
+      requestedModel: outcome.requestedModel,
+      forwardedModel: outcome.forwardedModel,
+      activeModel: outcome.activeModel,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  }
+
   if (outcome.thinkDropped) {
     await persistEvent(context.store, {
       type: 'unsupported_thinking_dropped',

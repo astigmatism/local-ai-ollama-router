@@ -428,7 +428,14 @@ function translateReasoning(reasoning, reasoningEffort, defaultThink) {
   };
 }
 
-export function translateResponsesRequest(body, activeModel, forcedKeepAlive, defaultThink, contextShift = false) {
+export function translateResponsesRequest(
+  body,
+  activeModel,
+  forcedKeepAlive,
+  defaultThink,
+  contextShift = false,
+  rewriteRequestedModelToActive = false
+) {
   if (arguments.length < 4) defaultThink = false;
   if (!isPlainObject(body)) invalid('INVALID_REQUEST_BODY', 'The request body must be a JSON object.');
   if (!activeModel) throw new ResponsesApiError(503, 'NO_ACTIVE_MODEL', 'No active model marker is available.', 'model', 'server_error');
@@ -438,10 +445,10 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
     invalid('STATEFUL_REQUEST_UNSUPPORTED', 'previous_response_id is unsupported; resend the full input history.', 'previous_response_id');
   }
-  if (body.model !== undefined && (typeof body.model !== 'string' || !body.model)) {
+  if (body.model !== undefined && (typeof body.model !== 'string' || !body.model.trim())) {
     invalid('INVALID_MODEL', 'model must be a non-empty string when provided.', 'model');
   }
-  if (body.model && body.model !== activeModel) {
+  if (!rewriteRequestedModelToActive && body.model && body.model !== activeModel) {
     invalid('MODEL_NOT_ACTIVE', 'Requested model is not the active deployed model for this router profile.', 'model');
   }
   if (body.input === undefined || body.input === null) invalid('INPUT_REQUIRED', 'input is required.', 'input');
@@ -476,11 +483,14 @@ export function translateResponsesRequest(body, activeModel, forcedKeepAlive, de
     ...(think === undefined ? {} : { think })
   };
 
+  const requestedModel = body.model ?? null;
   return {
     upstreamBody,
     incomingReasoningEffort: reasoningTranslation.incomingReasoningEffort,
     reasoningEffort: reasoningTranslation.effectiveReasoningEffort,
-    requestedModel: body.model ?? null,
+    requestedModel,
+    forwardedModel: activeModel,
+    modelRewritten: rewriteRequestedModelToActive && requestedModel !== activeModel,
     stream: body.stream === true,
     toolChoice: translatedTools.toolChoice,
     parallelToolCalls: body.parallel_tool_calls ?? true,
@@ -991,8 +1001,8 @@ function outcomeBase(started, pathname, body, activeModel, translated) {
     endpoint: pathname,
     activeModel,
     requestedModel: translated?.requestedModel ?? body?.model ?? null,
-    forwardedModel: translated ? activeModel : null,
-    modelRewritten: false,
+    forwardedModel: translated?.forwardedModel ?? null,
+    modelRewritten: translated?.modelRewritten ?? false,
     incomingKeepAlive: null,
     forwardedKeepAlive: translated ? translated.upstreamBody.keep_alive : null,
     keepAliveNormalized: Boolean(translated),
@@ -1046,7 +1056,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
       activeModelInfo.model,
       context.config.forcedKeepAlive,
       defaultThink,
-      context.config.responsesContextShift
+      context.config.responsesContextShift,
+      context.config.rewriteRequestedModelToActive
     );
     let thinkPolicy;
     try {

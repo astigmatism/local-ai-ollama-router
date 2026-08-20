@@ -27,7 +27,7 @@ This is enforced at the router so individual clients do not need to remember or 
 
 `src/server.js` owns the Node.js HTTP servers, route dispatch, admin endpoints, and Ollama-compatible proxy path. It starts two listeners by default: the Ollama-compatible API listener on `PORT` (`11434`) and the separate human admin listener on `ADMIN_PORT` (`11435`).
 
-`src/responses-api.js` owns the isolated OpenAI Responses compatibility path. `/v1/responses` and `/responses` are dispatched before the generic `/api/*` proxy, translated only to Ollama `/api/chat`, and validated directly against the active-model marker. The module does not call the configurable legacy proxy-policy evaluator, so permissive, allowlist, or rewrite settings cannot broaden its fixed-model rule.
+`src/responses-api.js` owns the isolated OpenAI Responses compatibility path. `/v1/responses` and `/responses` are dispatched before the generic `/api/*` proxy, translated only to Ollama `/api/chat`, and validated directly against the active-model marker. The module honors `REWRITE_REQUESTED_MODEL_TO_ACTIVE` for client-name compatibility but does not call the legacy proxy-policy evaluator: permissive and allowlist settings cannot change the single marker-model upstream target.
 
 ### Policy engine
 
@@ -98,6 +98,7 @@ Fields include:
 - method and endpoint
 - requested model
 - active model at request time
+- forwarded model and whether the request identifier was rewritten
 - incoming and forwarded `keep_alive`
 - incoming `think`, incoming Responses reasoning effort, forwarded `think`, mapping/drop state, and the effective reasoning effort
 - allow/reject state

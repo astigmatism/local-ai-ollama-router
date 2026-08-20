@@ -26,6 +26,10 @@ After changing environment variables, verify OpenWebUI did not keep a database-s
 
 For Open WebUI workflow/custom model compatibility, prefer protecting behavior at the router rather than modifying Open WebUI source. Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` for the router when Open WebUI should be allowed to send any configured base-model name while the router forwards the request to the deployed active Ollama model. The router preserves non-model request parameters such as `options`, `format`, messages, and streaming settings, and still normalizes `keep_alive` to the configured forced value. Boolean `think` controls are preserved; string controls are mapped through the active marker's `supported_think_levels` and `reasoning_effort_map`. Enabled thinking is then dropped if `/api/show` does not advertise `thinking`.
 
+## Codex
+
+With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, configure Codex's custom Responses provider with a stable identifier such as `model = "local-active"`. Codex may retain that identifier across day/night profile changes: request history records it as `requestedModel`, while `activeModel` and `forwardedModel` show the marker model that Ollama actually received. Strict mode remains available by setting the flag to `false`.
+
 ## ComfyUI
 
 Search for hardcoded raw URLs:

@@ -56,16 +56,22 @@ function lastUserText(body) {
   return [...(body?.messages || [])].reverse().find((message) => message.role === 'user')?.content || '';
 }
 
-function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = false } = {}) {
+function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = false, activeModel = 'active:model' } = {}) {
   const requests = [];
-  const state = { upstreamClosed: false };
+  const state = { upstreamClosed: false, residentModels: new Set([activeModel]) };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://fake-ollama.local');
     const body = ['GET', 'HEAD'].includes(String(request.method).toUpperCase()) ? null : await readJsonBody(request);
     requests.push({ method: request.method, pathname: url.pathname, body });
 
     if (request.method === 'GET' && url.pathname === '/api/tags') {
-      sendJson(response, 200, { models: [{ name: 'active:model', model: 'active:model' }] });
+      sendJson(response, 200, { models: [{ name: activeModel, model: activeModel }] });
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/api/ps') {
+      sendJson(response, 200, {
+        models: [...state.residentModels].map((model) => ({ name: model, model, expires_at: '9999-12-31T23:59:59Z' }))
+      });
       return;
     }
     if (request.method === 'POST' && url.pathname === '/api/show') {
@@ -76,6 +82,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       sendJson(response, 404, { error: 'not found' });
       return;
     }
+    state.residentModels.add(body.model);
     if (
       enforceThinkValues
       && Object.hasOwn(body || {}, 'think')
@@ -236,7 +243,10 @@ async function makeFixture({
   capabilities = ['completion'],
   enforceThinkValues = false
 } = {}) {
-  const upstream = createFakeOllama({ capabilities, enforceThinkValues });
+  const markerModel = typeof marker === 'object' && typeof marker.model === 'string'
+    ? marker.model
+    : 'active:model';
+  const upstream = createFakeOllama({ capabilities, enforceThinkValues, activeModel: markerModel });
   const upstreamPort = await listen(upstream.server);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'responses-api-test-'));
   const activeModelFile = path.join(dir, 'active-model.json');
@@ -270,7 +280,7 @@ async function makeFixture({
     await close(upstream.server);
     await fs.rm(dir, { recursive: true, force: true });
   }
-  return { ...router, upstream, apiPort, cleanup };
+  return { ...router, upstream, apiPort, activeModelFile, cleanup };
 }
 
 function postResponses(fixture, body, pathname = '/v1/responses', options = {}) {
@@ -963,18 +973,135 @@ test('invalid active-model thinking defaults fail closed before generation', asy
   }
 });
 
-test('exact active model is accepted, a different model is always HTTP 400, and no upstream mutation route is called', async () => {
-  const fixture = await makeFixture({ env: { MODEL_POLICY_MODE: 'permissive', REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' } });
+test('Responses rewrite mode treats requested models as advisory and preserves active-model residency', async () => {
+  const activeModel = 'orcarouter/qwen3.8-27b-uncensored';
+  const fixture = await makeFixture({
+    env: { REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' },
+    marker: { model: activeModel, ...NIGHT_REASONING_CAPABILITIES },
+    capabilities: ['completion', 'thinking']
+  });
   try {
-    const accepted = await postResponses(fixture, { model: 'active:model', input: 'hello' });
-    assert.equal(accepted.status, 200);
+    const markerBefore = await fs.readFile(fixture.activeModelFile, 'utf8');
+    const cases = [
+      { model: 'qwen3.8:27b-mtp-q4_K_M', stream: false, input: 'legacy nighttime identifier' },
+      { model: activeModel, stream: true, input: 'exact active identifier' },
+      { model: 'gpt-5.6-luna', stream: true, input: 'stable Codex identifier', reasoning: { effort: 'xhigh' } },
+      { stream: false, input: 'omitted identifier' }
+    ];
 
-    const rejected = await postResponses(fixture, { model: 'other:model', input: 'hello' });
+    for (const body of cases) {
+      const response = await postResponses(fixture, body);
+      assert.equal(response.status, 200);
+      if (body.stream) {
+        const events = parseSse(await response.text());
+        assert.equal(events.at(-1).type, 'response.completed');
+        assert.equal(events.at(-1).response.model, activeModel);
+      } else {
+        assert.equal((await response.json()).model, activeModel);
+      }
+    }
+
+    const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
+    assert.equal(chats.length, cases.length);
+    assert.deepEqual(chats.map((item) => item.body.model), cases.map(() => activeModel));
+    assert.deepEqual(chats.map((item) => item.body.keep_alive), cases.map(() => -1));
+    assert.deepEqual(chats.map((item) => item.body.shift), cases.map(() => false));
+    assert.equal(chats[2].body.think, true);
+
+    const psResponse = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/ps`);
+    assert.equal(psResponse.status, 200);
+    const ps = await psResponse.json();
+    assert.deepEqual(ps.models.map((model) => model.name), [activeModel]);
+
+    for (const [method, pathname] of [
+      ['POST', '/api/pull'],
+      ['POST', '/api/create'],
+      ['POST', '/api/copy'],
+      ['POST', '/api/push'],
+      ['DELETE', '/api/delete']
+    ]) {
+      const response = await fetch(`http://127.0.0.1:${fixture.apiPort}${pathname}`, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'attacker:model', name: 'attacker:model' })
+      });
+      assert.equal(response.status, 403);
+      assert.equal((await response.json()).error.code, 'MODEL_MANAGEMENT_DISABLED');
+    }
+
+    const managementPaths = new Set(['/api/pull', '/api/create', '/api/copy', '/api/push', '/api/delete']);
+    assert.equal(fixture.upstream.requests.some((item) => managementPaths.has(item.pathname)), false);
+    assert.equal(await fs.readFile(fixture.activeModelFile, 'utf8'), markerBefore);
+
+    const records = fixture.context.store.recentRequests(cases.length + 6)
+      .filter((record) => record.endpoint === '/v1/responses');
+    assert.equal(records.length, cases.length);
+    for (const record of records) {
+      assert.equal(record.activeModel, activeModel);
+      assert.equal(record.forwardedModel, activeModel);
+      assert.equal(record.status, 200);
+      assert.equal(record.responseStatus, 200);
+      assert.equal(Object.hasOwn(record.bodySummary, 'input'), false);
+    }
+    const recordsByRequestedModel = new Map(records.map((record) => [record.requestedModel, record]));
+    assert.equal(recordsByRequestedModel.get('qwen3.8:27b-mtp-q4_K_M').modelRewritten, true);
+    assert.equal(recordsByRequestedModel.get(activeModel).modelRewritten, false);
+    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').modelRewritten, true);
+    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').incomingReasoningEffort, 'xhigh');
+    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').forwardedThink, true);
+    assert.equal(recordsByRequestedModel.get(null).modelRewritten, true);
+
+    const rewriteEvents = fixture.context.store.recentEvents(10)
+      .filter((event) => event.type === 'model_rewritten_to_active');
+    assert.equal(rewriteEvents.length, 3);
+    assert.equal(rewriteEvents.every((event) => event.forwardedModel === activeModel), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Responses strict mode accepts exact and omitted models but rejects mismatches before Ollama', async () => {
+  const fixture = await makeFixture({
+    env: {
+      REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'false',
+      MODEL_POLICY_MODE: 'permissive',
+      ALLOWED_MODELS: 'gpt-5.6-luna'
+    }
+  });
+  try {
+    const exact = await postResponses(fixture, { model: 'active:model', input: 'exact' });
+    assert.equal(exact.status, 200);
+
+    const omitted = await postResponses(fixture, { input: 'omitted' });
+    assert.equal(omitted.status, 200);
+
+    const rejected = await postResponses(fixture, { model: 'gpt-5.6-luna', input: 'mismatch' });
     assert.equal(rejected.status, 400);
     assert.equal((await rejected.json()).error.code, 'MODEL_NOT_ACTIVE');
 
-    assert.equal(fixture.upstream.requests.filter((item) => item.pathname === '/api/chat').length, 1);
-    assert.equal(fixture.upstream.requests.some((item) => ['/api/pull', '/api/create', '/api/copy'].includes(item.pathname)), false);
+    const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
+    assert.equal(chats.length, 2);
+    assert.deepEqual(chats.map((item) => item.body.model), ['active:model', 'active:model']);
+    const rejectedRecord = fixture.context.store.recentRequests(1)[0];
+    assert.equal(rejectedRecord.requestedModel, 'gpt-5.6-luna');
+    assert.equal(rejectedRecord.activeModel, 'active:model');
+    assert.equal(rejectedRecord.forwardedModel, null);
+    assert.equal(rejectedRecord.modelRewritten, false);
+    assert.equal(rejectedRecord.status, 400);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Responses rewrite mode rejects empty model identifiers before Ollama', async () => {
+  const fixture = await makeFixture({ env: { REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' } });
+  try {
+    for (const model of ['', '   ']) {
+      const response = await postResponses(fixture, { model, input: 'invalid identifier' });
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error.code, 'INVALID_MODEL');
+    }
+    assert.equal(fixture.upstream.requests.length, 0);
   } finally {
     await fixture.cleanup();
   }

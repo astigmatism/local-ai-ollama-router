@@ -44,7 +44,11 @@ ADMIN_PORT=11435
 ADMIN_PUBLIC_PORT=11435
 OLLAMA_UPSTREAM_URL=http://ollama:11434
 UNIFIED_MODELS_DIR=<actual unified model directory>
+REWRITE_REQUESTED_MODEL_TO_ACTIVE=true
+ALLOW_MODEL_MANAGEMENT=false
 ```
+
+`REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` is the production compatibility setting for a stable Codex identifier. It does not select or load the marker model; it only makes the client identifier advisory. The deployment/profile system remains the sole writer of `active-model.json`.
 
 ## Phase 2: active model marker
 
@@ -86,6 +90,40 @@ Open admin portal, no token required:
 ```text
 http://192.168.1.21:11435/
 ```
+
+## Responses/Codex production handoff
+
+Configure Codex with a stable client identifier:
+
+```toml
+model_provider = "local_ollama_router"
+model = "local-active"
+model_reasoning_effort = "none"
+web_search = "disabled"
+
+[model_providers.local_ollama_router]
+name = "Local Ollama Router"
+base_url = "http://192.168.1.21:11434/v1"
+wire_api = "responses"
+requires_openai_auth = false
+```
+
+Before production cutover, run both smoke tests against the candidate deployment without changing the marker:
+
+```bash
+ROUTER_URL=http://192.168.1.21:11434 \
+ADMIN_URL=http://192.168.1.21:11435 \
+REQUESTED_MODEL=local-active \
+./scripts/responses-smoke-test.sh
+
+ROUTER_URL=http://192.168.1.21:11434 \
+REQUESTED_MODEL=local-active \
+./scripts/codex-responses-smoke-test.sh
+```
+
+Verify request history records `requestedModel: local-active`, `activeModel` and `forwardedModel` equal to the marker model, `modelRewritten: true`, and successful status/reasoning fields. Compare `ollama ps` before and after: only the active model should be resident and its lifetime should remain `Forever`. Also confirm no `/api/pull`, `/api/create`, `/api/copy`, `/api/push`, or `/api/delete` reached raw Ollama.
+
+Strict-mode rollback is configuration-only: set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`, restart the router, and configure Codex with the exact active marker model. In that mode, mismatches return `MODEL_NOT_ACTIVE`, while exact and omitted Responses models remain accepted.
 
 ## Phase 4: keep-alive enforcement test
 
@@ -213,9 +251,17 @@ Once the router admin UI covers the needed portal features, stop publishing `loc
 - ComfyUI prompt bridge calls the router.
 - Voice assistant calls the router.
 - Streaming and non-streaming responses work.
+- With Responses rewriting enabled, `local-active`, arbitrary non-empty identifiers, and an omitted model all forward only the active marker model.
+- With Responses rewriting disabled, mismatched identifiers return `MODEL_NOT_ACTIVE`; exact and omitted models still work.
 - Active model requests without `keep_alive` are forwarded with `-1`.
 - Active model requests with finite `keep_alive` are forwarded with `-1`.
 - Non-active model requests are rejected by default.
 - Request history shows client identity, endpoint, model, keep-alive rewrite, status, and latency.
+- Responses history distinguishes requested, active, and forwarded model names and records `modelRewritten` plus reasoning telemetry.
+- `ollama ps` contains only the active model after advisory-name tests, and no model-management operation reaches Ollama.
 - Admin dashboard is reachable without a token on `http://192.168.1.21:11435/` and shows upstream health and active loaded state.
 - Raw Ollama is not published directly to the LAN.
+
+## Independent nighttime CUDA vision OOM
+
+The CUDA vision OOM is not addressed by this router release. Correct the nighttime VRAM configuration as a separate deployment change and validate it independently; do not attribute that failure to Responses model rewriting.
