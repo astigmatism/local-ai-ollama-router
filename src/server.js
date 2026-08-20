@@ -11,7 +11,14 @@ import { evaluateProxyPolicy, isLikelyStreamingRequest, MODEL_BODY_ROUTES, route
 import { handleResponsesRequest, isResponsesPath } from './responses-api.js';
 import { NdjsonUsageCollector, extractUsageFromOllamaObject } from './stream-parser.js';
 import { getGpuTelemetry } from './telemetry.js';
-import { activeModelLoadedState, checkUpstream, getOllamaPs, normalizeThinkForModel, upstreamJson } from './upstream.js';
+import {
+  activeModelLoadedState,
+  checkUpstream,
+  getOllamaPs,
+  normalizeThinkForModel,
+  upstreamFetch,
+  upstreamJson
+} from './upstream.js';
 import { resolveDefaultThink, thinkLevelToReasoningEffort } from './reasoning.js';
 import {
   copyUpstreamHeaders,
@@ -499,9 +506,12 @@ async function handleProxy(request, response, url, context) {
   let upstreamResponse;
   try {
     const hasBody = methodAllowsBody(request.method) && sanitizedBody !== null;
-    upstreamResponse = await fetch(`${context.config.upstreamUrl}${upstreamPath}`, {
+    upstreamResponse = await upstreamFetch(context.config, upstreamPath, {
       method: request.method,
-      headers: filterRequestHeaders(request.headers, hasBody ? { 'content-type': 'application/json' } : {}),
+      headers: filterRequestHeaders(
+        request.headers,
+        hasBody ? { 'content-type': 'application/json' } : {}
+      ),
       body: hasBody ? JSON.stringify(sanitizedBody) : undefined
     });
   } catch (error) {
@@ -803,15 +813,24 @@ export async function createRouterServer(config = loadConfig()) {
     protectedModelEndpoints: config.protectedModelEndpoints
   });
 
+  const activeRequests = new Set();
+  const trackRequest = (requestPromise) => {
+    activeRequests.add(requestPromise);
+    const finished = () => activeRequests.delete(requestPromise);
+    void requestPromise.then(finished, finished);
+  };
+  const waitForIdle = async () => {
+    while (activeRequests.size) await Promise.allSettled([...activeRequests]);
+  };
   const server = http.createServer((request, response) => {
-    void handleRequest(request, response, context);
+    trackRequest(handleRequest(request, response, context));
   });
   const adminServer = config.adminEnabled
     ? http.createServer((request, response) => {
-      void handleAdminRequest(request, response, context);
+      trackRequest(handleAdminRequest(request, response, context));
     })
     : null;
-  return { server, adminServer, context };
+  return { server, adminServer, context, waitForIdle };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

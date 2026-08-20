@@ -81,6 +81,8 @@ DELETE /api/delete
 
 To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must include legacy admin authorization on the router API listener when `ADMIN_TOKEN` is set.
 
+All Ollama upstream calls use Node's native HTTP transport. The configured `OLLAMA_UPSTREAM_TIMEOUT_MS` covers queue and model-load waits through receipt of the upstream response headers. JSON request bodies are sent with an explicit byte `Content-Length`, not chunked transfer framing.
+
 ## OpenAI Responses compatibility
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
@@ -162,7 +164,9 @@ For a tool follow-up, resend the preceding function-call item, append one `funct
 
 Ollama assistant `message.thinking` is returned as a Responses `reasoning` item with an `rs_...` ID, an empty `summary`, and raw `reasoning_text` content. Streaming emits `response.output_item.added`, `response.reasoning_text.delta`, `response.reasoning_text.done`, and `response.output_item.done` before any following assistant message or function call. The adapter does not synthesize a reasoning summary.
 
-Current Ollama chat responses expose aggregate `eval_count` but no exact reasoning-token breakdown. When thinking is present, completed Responses payloads therefore use `usage: null` instead of falsely reporting `reasoning_tokens: 0` or estimating a count. Responses without thinking retain the existing usage mapping.
+Ollama's aggregate `prompt_eval_count` and `eval_count` map exactly to Responses `input_tokens`, `output_tokens`, and `total_tokens`, including when thinking is present. This preserves the context accounting clients need for automatic compaction during long reasoning sessions. Ollama does not expose the reasoning/visible-output split, so the adapter conservatively attributes all aggregate output tokens to `reasoning_tokens` when thinking was emitted; that attribution is not an exact split, while `output_tokens` and `total_tokens` remain exact. Without thinking, `reasoning_tokens` is zero.
+
+A completion must contain non-whitespace assistant text or at least one function call. Thinking-only, whitespace-only, and otherwise blank results receive `EMPTY_UPSTREAM_RESPONSE` instead of a fabricated empty message. For an already-started SSE response this is the final `response.failed` event, with no `response.completed` event; tool-only results remain valid.
 
 Top-level `type: "function"` tools and Codex `type: "namespace"` groups containing only functions are accepted. Namespace members are given collision-safe qualified names for Ollama, then restored to separate `namespace` and `name` fields in Responses function-call items so Codex can dispatch them locally. Built-in provider tools such as `web_search`, `file_search`, `computer_use`, and `image_generation` receive HTTP 400 even when `tool_choice` is `none`; this prevents silent loss of capabilities assumed by the client. Configure Codex with `web_search = "disabled"`.
 
@@ -179,7 +183,7 @@ curl -fsS http://192.168.1.21:11434/v1/responses \
   }'
 ```
 
-The result is an OpenAI Responses object containing `id`, `object: "response"`, `created_at`, `status`, the active `model`, `output`, `usage`, `error`, and `incomplete_details`. Ollama prompt/evaluation token counters map to `input_tokens`, `output_tokens`, and `total_tokens`.
+The result is an OpenAI Responses object containing `id`, `object: "response"`, `created_at`, `status`, the active `model`, `output`, `usage`, `error`, and `incomplete_details`. Ollama prompt/evaluation token counters always map to exact aggregate `input_tokens`, `output_tokens`, and `total_tokens`.
 
 ### Streaming example
 
@@ -223,7 +227,7 @@ Errors returned before streaming begins use the OpenAI-compatible envelope. For 
 }
 ```
 
-Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
+Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `EMPTY_UPSTREAM_RESPONSE`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
 
 ## Router errors
 

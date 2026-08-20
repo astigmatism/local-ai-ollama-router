@@ -40,8 +40,10 @@ The admin portal and its admin-port JSON APIs are intentionally unauthenticated.
 | Variable | Default | Purpose |
 |---|---:|---|
 | `OLLAMA_UPSTREAM_URL` | `http://ollama:11434` | Raw Ollama backend URL. |
-| `OLLAMA_UPSTREAM_TIMEOUT_MS` | `900000` | Long timeout for large model loads/responses. |
+| `OLLAMA_UPSTREAM_TIMEOUT_MS` | `900000` | Native HTTP timeout while awaiting Ollama's response, including queue/model-load waits before response headers. |
 | `RESPONSES_CONTEXT_SHIFT` | `false` | Controls Ollama `shift` only for `/v1/responses` and `/responses`; disabled by default so Codex requests fail instead of silently shifting old context. |
+
+The router uses Node's native HTTP transport for all Ollama calls, so `OLLAMA_UPSTREAM_TIMEOUT_MS` remains authoritative while Ollama is queued or loading a model before it sends response headers. JSON bodies are framed with an explicit byte `Content-Length` rather than `Transfer-Encoding: chunked`.
 
 ## Active model
 

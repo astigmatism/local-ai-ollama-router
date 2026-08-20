@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
-import { normalizeThinkForModel } from './upstream.js';
+import { normalizeThinkForModel, upstreamFetch } from './upstream.js';
 import {
   RESPONSES_REASONING_EFFORTS,
   thinkLevelToReasoningEffort,
@@ -500,18 +500,18 @@ export function translateResponsesRequest(
 }
 
 function usageFromOllama(payload, reasoningProduced = false) {
-  // Ollama currently reports only aggregate eval_count, not the exact split
-  // between thinking and visible output. A completed Responses usage object
-  // requires an exact reasoning_tokens integer, so omit usage entirely when
-  // reasoning was produced rather than misreporting zero or estimating.
-  if (reasoningProduced) return null;
+  // Ollama reports an exact aggregate eval_count but not the split between
+  // thinking and visible output. Preserve the exact input/output/total counts
+  // Codex needs for context accounting. When thinking is present, attribute
+  // the aggregate output count conservatively to reasoning rather than
+  // suppressing the entire usage object and disabling automatic compaction.
   const inputTokens = Number.isFinite(payload?.prompt_eval_count) ? payload.prompt_eval_count : 0;
   const outputTokens = Number.isFinite(payload?.eval_count) ? payload.eval_count : 0;
   return {
     input_tokens: inputTokens,
     input_tokens_details: { cached_tokens: 0 },
     output_tokens: outputTokens,
-    output_tokens_details: { reasoning_tokens: 0 },
+    output_tokens_details: { reasoning_tokens: reasoningProduced ? outputTokens : 0 },
     total_tokens: inputTokens + outputTokens
   };
 }
@@ -638,9 +638,18 @@ export function translateOllamaResponse(
     }
     callIds.add(toolCall.call_id);
   }
+  if (!text.trim() && !toolCalls.length) {
+    throw new ResponsesApiError(
+      502,
+      'EMPTY_UPSTREAM_RESPONSE',
+      'Ollama completed generation without a visible assistant message or function call.',
+      null,
+      'server_error'
+    );
+  }
   const output = [];
   if (thinking) output.push(reasoningOutputItem(thinking));
-  if (text || !toolCalls.length) output.push(messageOutputItem(text));
+  if (text) output.push(messageOutputItem(text));
   output.push(...toolCalls);
   return {
     ...responseShell(requestBody, activeModel, responseId, createdAt, 'completed'),
@@ -856,7 +865,16 @@ class StreamingResponseBuilder {
 
   async complete() {
     await this.finishReasoning();
-    if (!this.textItem && !this.toolItems.length) await this.ensureTextItem();
+    const visibleText = this.textItem?.item.content[0].text || '';
+    if (!visibleText.trim() && !this.toolItems.length) {
+      throw new ResponsesApiError(
+        502,
+        'EMPTY_UPSTREAM_RESPONSE',
+        'Ollama completed generation without a visible assistant message or function call.',
+        null,
+        'server_error'
+      );
+    }
     if (this.textItem) {
       const { item, outputIndex } = this.textItem;
       item.status = 'completed';
@@ -1087,9 +1105,12 @@ export async function handleResponsesRequest(request, response, pathname, contex
 
     let upstreamResponse;
     try {
-      upstreamResponse = await fetch(`${context.config.upstreamUrl}/api/chat`, {
+      upstreamResponse = await upstreamFetch(context.config, '/api/chat', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', accept: translated.stream ? 'application/x-ndjson' : 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          accept: translated.stream ? 'application/x-ndjson' : 'application/json'
+        },
         body: JSON.stringify(translated.upstreamBody),
         signal: abortState.signal
       });

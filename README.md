@@ -28,6 +28,7 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
 - Profile-specific `think` negotiation that maps OpenAI reasoning efforts only to string levels declared safe for the active model.
 - Cross-protocol thinking composition with request, active-model, and optional global defaults.
 - Streaming and non-streaming pass-through.
+- Native Node HTTP transport for Ollama requests, including configured timeouts while queued or loading before response headers arrive.
 - Persistent request log in JSONL.
 - Persistent activity/event log in JSONL.
 - Telemetry extraction from Ollama final response chunks and non-streaming responses.
@@ -143,7 +144,9 @@ Ollama's advertised `thinking` capability remains the binary enabled/disabled ch
 
 The Responses adapter always calls only Ollama `/api/chat` with the active marker model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, an omitted model or any non-empty client identifier is replaced with the marker model. With the flag set to `false`, an omitted model or the exact active model is accepted and a mismatch receives HTTP 400 `MODEL_NOT_ACTIVE`. `MODEL_POLICY_MODE` and `ALLOWED_MODELS` do not broaden this boundary. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
 
-Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Because Ollama currently provides no exact reasoning-token count separate from aggregate `eval_count`, Responses with thinking report `usage: null`; non-thinking usage is unchanged.
+Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Ollama's aggregate `prompt_eval_count` and `eval_count` map exactly to Responses input, output, and total usage so Codex can track context and compact long reasoning sessions. Ollama does not expose the split between reasoning and visible output; when thinking is present, the adapter conservatively attributes all aggregate output tokens to `reasoning_tokens` without changing the exact output or total counts. A thinking-only, whitespace-only, or otherwise blank result with no function call fails as `EMPTY_UPSTREAM_RESPONSE` instead of succeeding with an empty assistant message.
+
+All Ollama-bound routes use Node's native HTTP transport. `OLLAMA_UPSTREAM_TIMEOUT_MS` therefore governs Ollama model-load and queue waits through receipt of the response headers; JSON request bodies carry `Content-Length` rather than chunked framing.
 
 Codex CLI 0.144.3 can be configured with:
 

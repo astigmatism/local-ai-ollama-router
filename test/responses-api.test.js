@@ -112,6 +112,20 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
         });
         return;
       }
+      if (prompt === 'thinking-only') {
+        sendJson(response, 200, {
+          model: body.model,
+          message: {
+            role: 'assistant',
+            thinking: 'I reached no visible answer.',
+            content: ''
+          },
+          done: true,
+          prompt_eval_count: 17,
+          eval_count: 6
+        });
+        return;
+      }
       if (prompt === 'tool') {
         sendJson(response, 200, {
           model: body.model,
@@ -206,6 +220,21 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       })}\n`);
       return;
     }
+    if (prompt === 'stream-thinking-only') {
+      response.write(`${JSON.stringify({
+        model: body.model,
+        message: { role: 'assistant', thinking: 'I reached no visible answer.', content: '' },
+        done: false
+      })}\n`);
+      response.end(`${JSON.stringify({
+        model: body.model,
+        message: { role: 'assistant', content: '' },
+        done: true,
+        prompt_eval_count: 18,
+        eval_count: 5
+      })}\n`);
+      return;
+    }
     if (prompt === 'slow') {
       response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: false })}\n`);
       response.once('close', () => { state.upstreamClosed = true; });
@@ -277,6 +306,7 @@ async function makeFixture({
 
   async function cleanup() {
     await close(router.server);
+    await router.waitForIdle();
     await close(upstream.server);
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -698,7 +728,7 @@ test('non-stream response translation emits text, function calls, stable IDs, an
   });
 });
 
-test('non-stream response emits raw thinking before assistant text and tool calls without fabricated usage', () => {
+test('non-stream response emits raw thinking before assistant text and tool calls with aggregate usage', () => {
   const translated = translateOllamaResponse({
     message: {
       role: 'assistant',
@@ -721,7 +751,13 @@ test('non-stream response emits raw thinking before assistant text and tool call
   });
   assert.equal(translated.output[1].content[0].text, 'tool preface');
   assert.equal(translated.output[2].call_id, 'call_thinking');
-  assert.equal(translated.usage, null);
+  assert.deepEqual(translated.usage, {
+    input_tokens: 13,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: 8,
+    output_tokens_details: { reasoning_tokens: 8 },
+    total_tokens: 21
+  });
 });
 
 test('POST /v1/responses defaults to the active model and leaves existing model endpoints unchanged', async () => {
@@ -986,6 +1022,7 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
       { model: 'qwen3.8:27b-mtp-q4_K_M', stream: false, input: 'legacy nighttime identifier' },
       { model: activeModel, stream: true, input: 'exact active identifier' },
       { model: 'gpt-5.6-luna', stream: true, input: 'stable Codex identifier', reasoning: { effort: 'xhigh' } },
+      { model: 'local-active', stream: false, input: 'documented stable identifier' },
       { stream: false, input: 'omitted identifier' }
     ];
 
@@ -1049,11 +1086,12 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
     assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').modelRewritten, true);
     assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').incomingReasoningEffort, 'xhigh');
     assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').forwardedThink, true);
+    assert.equal(recordsByRequestedModel.get('local-active').modelRewritten, true);
     assert.equal(recordsByRequestedModel.get(null).modelRewritten, true);
 
     const rewriteEvents = fixture.context.store.recentEvents(10)
       .filter((event) => event.type === 'model_rewritten_to_active');
-    assert.equal(rewriteEvents.length, 3);
+    assert.equal(rewriteEvents.length, 4);
     assert.equal(rewriteEvents.every((event) => event.forwardedModel === activeModel), true);
   } finally {
     await fixture.cleanup();
@@ -1217,7 +1255,13 @@ test('reasoning plus a tool call is returned and preserved with the tool result 
     assert.equal(reasoning.summary.length, 0);
     assert.match(reasoning.id, /^rs_[a-f0-9]{32}$/);
     assert.equal(call.call_id, 'call_weather_thinking');
-    assert.equal(firstPayload.usage, null);
+    assert.deepEqual(firstPayload.usage, {
+      input_tokens: 14,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 9,
+      output_tokens_details: { reasoning_tokens: 9 },
+      total_tokens: 23
+    });
 
     const second = await postResponses(fixture, {
       input: [
@@ -1344,7 +1388,48 @@ test('streaming thinking emits a complete reasoning item before the following to
     assert.deepEqual(completed.response.output.map((item) => item.type), ['reasoning', 'function_call']);
     assert.equal(completed.response.output[0].content[0].text, 'I should read the value.');
     assert.equal(completed.response.output[1].call_id, 'call_stream_thinking');
-    assert.equal(completed.response.usage, null);
+    assert.deepEqual(completed.response.usage, {
+      input_tokens: 6,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 5 },
+      total_tokens: 11
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('thinking-only Responses completions fail without fabricating assistant messages', async () => {
+  const fixture = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  try {
+    const nonStreaming = await postResponses(fixture, {
+      input: 'thinking-only',
+      reasoning: { effort: 'medium' }
+    });
+    assert.equal(nonStreaming.status, 502);
+    const nonStreamingPayload = await nonStreaming.json();
+    assert.equal(nonStreamingPayload.error.type, 'server_error');
+    assert.equal(nonStreamingPayload.error.code, 'EMPTY_UPSTREAM_RESPONSE');
+
+    const streaming = await postResponses(fixture, {
+      input: 'stream-thinking-only',
+      stream: true,
+      reasoning: { effort: 'medium' }
+    });
+    assert.equal(streaming.status, 200);
+    const events = parseSse(await streaming.text());
+    assert.equal(events.at(-1).type, 'response.failed');
+    assert.equal(events.at(-1).response.error.code, 'EMPTY_UPSTREAM_RESPONSE');
+    assert.equal(events.some((event) => event.type === 'response.completed'), false);
+    assert.equal(events.some(
+      (event) => event.type === 'response.output_item.added' && event.item.type === 'message'
+    ), false);
+
+    assert.throws(
+      () => translateOllamaResponse({ message: { role: 'assistant', content: '   ' } }, { input: 'x' }, 'active:model'),
+      (error) => error instanceof ResponsesApiError && error.code === 'EMPTY_UPSTREAM_RESPONSE'
+    );
   } finally {
     await fixture.cleanup();
   }

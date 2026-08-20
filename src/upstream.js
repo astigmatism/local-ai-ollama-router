@@ -1,17 +1,62 @@
+import http from 'node:http';
+import https from 'node:https';
+import { Readable } from 'node:stream';
 import { extractUsageFromOllamaObject } from './stream-parser.js';
 import { isThinkingEnabled, normalizeThinkValue, validateReasoningCapabilities } from './reasoning.js';
 
+function responseHeaders(message) {
+  const headers = new Headers();
+  for (let index = 0; index < message.rawHeaders.length; index += 2) {
+    headers.append(message.rawHeaders[index], message.rawHeaders[index + 1]);
+  }
+  return headers;
+}
+
+function requestWithNodeTransport(url, options = {}) {
+  const target = new URL(url);
+  const transport = target.protocol === 'https:' ? https : http;
+  const method = options.method || 'GET';
+  const headers = new Headers(options.headers);
+  if (options.body !== undefined && options.body !== null && !headers.has('content-length')) {
+    headers.set('content-length', String(Buffer.byteLength(options.body)));
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(target, {
+      method,
+      headers: Object.fromEntries(headers.entries()),
+      signal: options.signal
+    }, (message) => {
+      const status = message.statusCode || 500;
+      const hasBody = method !== 'HEAD' && ![101, 204, 205, 304].includes(status);
+      const body = hasBody ? Readable.toWeb(message) : null;
+      if (!hasBody) message.resume();
+      resolve(new Response(body, {
+        status,
+        statusText: message.statusMessage || '',
+        headers: responseHeaders(message)
+      }));
+    });
+
+    request.once('error', reject);
+    if (options.body !== undefined && options.body !== null) request.write(options.body);
+    request.end();
+  });
+}
+
 export async function upstreamFetch(config, pathname, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? config.upstreamTimeoutMs);
+  const timeoutMs = options.timeoutMs ?? config.upstreamTimeoutMs;
+  const controller = options.signal ? null : new AbortController();
+  const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  const { timeoutMs: _timeoutMs, signal: suppliedSignal, ...requestOptions } = options;
   try {
     const url = `${config.upstreamUrl}${pathname}`;
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal
+    return await requestWithNodeTransport(url, {
+      ...requestOptions,
+      signal: suppliedSignal || controller.signal
     });
   } finally {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
   }
 }
 
