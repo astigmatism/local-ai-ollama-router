@@ -17,7 +17,9 @@ Default published ports:
 
 The Ollama-compatible API remains separate from the browser portal. Requests to `/api/*` on the admin port return a router error instead of proxying to Ollama.
 
-The API listener also exposes the stateless `/v1/responses` compatibility endpoint and `/responses` alias. These routes always target the active marker model through Ollama `/api/chat` and provide no model-management operation or arbitrary upstream path. When `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, any non-empty requested identifier is advisory and is replaced with the marker model; when false, mismatches are rejected. Neither mode lets the client select or load another installed model.
+The API listener also exposes the stateless `/v1/responses` compatibility endpoint and `/responses` alias. These routes always target the active marker model through Ollama `/api/chat` and provide no model-management operation or arbitrary upstream path. The exact `ROUTER_MODEL_ALIAS` always resolves to active. When `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, any other non-empty requested identifier is advisory and is replaced with the marker model; when false, other mismatches are rejected. Neither mode lets the client select or load another installed model.
+
+`GET /v1/models` and `GET /v1/models/{alias}` use the same API-listener trust/authentication boundary as Responses. They expose one stable alias plus the current physical `upstream_model` already visible in router health. Discovery calls only Ollama `/api/ps` and `/api/show`; it does not enumerate `/api/tags`, generate, prewarm, load, pull, or manage models. Discovery warnings never include upstream response bodies, filesystem paths, credentials, prompts, or environment values.
 
 ## Prompt logging
 

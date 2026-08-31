@@ -144,6 +144,36 @@ test('rewrite requested model to active covers model show requests', () => {
   assert.equal(result.sanitizedBody.verbose, true);
 });
 
+test('the exact public alias resolves to active across native model routes when broad rewrite is disabled', () => {
+  for (const pathname of ['/api/chat', '/api/generate', '/api/embed', '/api/embeddings', '/api/show']) {
+    const result = evaluateProxyPolicy({
+      method: 'POST',
+      pathname,
+      body: { model: 'local-active' },
+      activeModelInfo: { model: 'model-a:test' },
+      config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'false' })
+    });
+    assert.equal(result.allowed, true, pathname);
+    assert.equal(result.requestedModel, 'local-active', pathname);
+    assert.equal(result.forwardedModel, 'model-a:test', pathname);
+    assert.equal(result.sanitizedBody.model, 'model-a:test', pathname);
+    assert.equal(result.modelRewritten, true, pathname);
+  }
+});
+
+test('strict mode does not treat arbitrary non-alias model names as aliases', () => {
+  const result = evaluateProxyPolicy({
+    method: 'POST',
+    pathname: '/api/chat',
+    body: { model: 'some-other-name', messages: [] },
+    activeModelInfo: { model: 'model-a:test' },
+    config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'false' })
+  });
+  assert.equal(result.allowed, false);
+  assert.equal(result.code, 'MODEL_NOT_ACTIVE');
+  assert.equal(result.forwardedModel, 'some-other-name');
+});
+
 test('missing active marker fails closed', () => {
   const result = evaluateProxyPolicy({
     method: 'POST',

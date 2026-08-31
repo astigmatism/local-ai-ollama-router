@@ -764,7 +764,7 @@ test('non-stream response emits raw thinking before assistant text and tool call
   });
 });
 
-test('POST /v1/responses defaults to the active model and leaves existing model endpoints unchanged', async () => {
+test('POST /v1/responses defaults to the active model and public discovery exposes its stable alias', async () => {
   const fixture = await makeFixture({ env: { MODEL_POLICY_MODE: 'permissive', REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' } });
   try {
     const response = await postResponses(fixture, { input: 'hello', stream: false });
@@ -791,7 +791,9 @@ test('POST /v1/responses defaults to the active model and leaves existing model 
     assert.equal(fixture.upstream.requests.filter((item) => item.pathname === '/api/tags').length, 1);
 
     const models = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
-    assert.equal(models.status, 404);
+    assert.equal(models.status, 200);
+    const catalog = await models.json();
+    assert.deepEqual(catalog.data.map((model) => model.id), ['local-active']);
   } finally {
     await fixture.cleanup();
   }
@@ -1019,7 +1021,7 @@ test('invalid active-model thinking defaults fail closed before generation', asy
 });
 
 test('Responses rewrite mode treats requested models as advisory and preserves active-model residency', async () => {
-  const activeModel = 'orcarouter/qwen3.8-27b-uncensored';
+  const activeModel = 'model-a:test';
   const fixture = await makeFixture({
     env: { REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' },
     marker: { model: activeModel, ...NIGHT_REASONING_CAPABILITIES },
@@ -1028,9 +1030,9 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
   try {
     const markerBefore = await fs.readFile(fixture.activeModelFile, 'utf8');
     const cases = [
-      { model: 'qwen3.8:27b-mtp-q4_K_M', stream: false, input: 'legacy nighttime identifier' },
+      { model: 'legacy-client:test', stream: false, input: 'legacy profile identifier' },
       { model: activeModel, stream: true, input: 'exact active identifier' },
-      { model: 'gpt-5.6-luna', stream: true, input: 'stable Codex identifier', reasoning: { effort: 'xhigh' } },
+      { model: 'client-slot:test', stream: true, input: 'stable client identifier', reasoning: { effort: 'xhigh' } },
       { model: 'local-active', stream: false, input: 'documented stable identifier' },
       { stream: false, input: 'omitted identifier' }
     ];
@@ -1090,11 +1092,11 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
       assert.equal(Object.hasOwn(record.bodySummary, 'input'), false);
     }
     const recordsByRequestedModel = new Map(records.map((record) => [record.requestedModel, record]));
-    assert.equal(recordsByRequestedModel.get('qwen3.8:27b-mtp-q4_K_M').modelRewritten, true);
+    assert.equal(recordsByRequestedModel.get('legacy-client:test').modelRewritten, true);
     assert.equal(recordsByRequestedModel.get(activeModel).modelRewritten, false);
-    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').modelRewritten, true);
-    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').incomingReasoningEffort, 'xhigh');
-    assert.equal(recordsByRequestedModel.get('gpt-5.6-luna').forwardedThink, true);
+    assert.equal(recordsByRequestedModel.get('client-slot:test').modelRewritten, true);
+    assert.equal(recordsByRequestedModel.get('client-slot:test').incomingReasoningEffort, 'xhigh');
+    assert.equal(recordsByRequestedModel.get('client-slot:test').forwardedThink, true);
     assert.equal(recordsByRequestedModel.get('local-active').modelRewritten, true);
     assert.equal(recordsByRequestedModel.get(null).modelRewritten, true);
 
@@ -1107,12 +1109,12 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
   }
 });
 
-test('Responses strict mode accepts exact and omitted models but rejects mismatches before Ollama', async () => {
+test('Responses strict mode accepts the public alias, exact, and omitted models but rejects other names', async () => {
   const fixture = await makeFixture({
     env: {
       REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'false',
       MODEL_POLICY_MODE: 'permissive',
-      ALLOWED_MODELS: 'gpt-5.6-luna'
+      ALLOWED_MODELS: 'other-client:test'
     }
   });
   try {
@@ -1122,15 +1124,18 @@ test('Responses strict mode accepts exact and omitted models but rejects mismatc
     const omitted = await postResponses(fixture, { input: 'omitted' });
     assert.equal(omitted.status, 200);
 
-    const rejected = await postResponses(fixture, { model: 'gpt-5.6-luna', input: 'mismatch' });
+    const alias = await postResponses(fixture, { model: 'local-active', input: 'stable alias' });
+    assert.equal(alias.status, 200);
+
+    const rejected = await postResponses(fixture, { model: 'other-client:test', input: 'mismatch' });
     assert.equal(rejected.status, 400);
     assert.equal((await rejected.json()).error.code, 'MODEL_NOT_ACTIVE');
 
     const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
-    assert.equal(chats.length, 2);
-    assert.deepEqual(chats.map((item) => item.body.model), ['active:model', 'active:model']);
+    assert.equal(chats.length, 3);
+    assert.deepEqual(chats.map((item) => item.body.model), ['active:model', 'active:model', 'active:model']);
     const rejectedRecord = fixture.context.store.recentRequests(1)[0];
-    assert.equal(rejectedRecord.requestedModel, 'gpt-5.6-luna');
+    assert.equal(rejectedRecord.requestedModel, 'other-client:test');
     assert.equal(rejectedRecord.activeModel, 'active:model');
     assert.equal(rejectedRecord.forwardedModel, null);
     assert.equal(rejectedRecord.modelRewritten, false);

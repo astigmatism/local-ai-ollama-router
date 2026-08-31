@@ -8,6 +8,13 @@ function envString(env, key, fallback) {
   return String(value).trim();
 }
 
+function envRequiredString(env, key, fallback) {
+  if (env[key] === undefined || env[key] === null) return fallback;
+  const value = String(env[key]).trim();
+  if (!value) throw new TypeError(`${key} must be a non-empty string.`);
+  return value;
+}
+
 function envInt(env, key, fallback, minimum = undefined) {
   const raw = envString(env, key, String(fallback));
   const value = Number.parseInt(raw, 10);
@@ -65,6 +72,8 @@ export function loadConfig(env = process.env) {
     responsesContextShift: envBool(env, 'RESPONSES_CONTEXT_SHIFT', false),
     activeModelFile: envString(env, 'ACTIVE_MODEL_FILE', '/app/runtime/active-model.json'),
     activeModelFallback: envString(env, 'ACTIVE_MODEL', ''),
+    routerModelAlias: envRequiredString(env, 'ROUTER_MODEL_ALIAS', 'local-active'),
+    routerModelMetadataTtlMs: envInt(env, 'ROUTER_MODEL_METADATA_TTL_MS', 5000, 0),
     modelPolicyMode: envString(env, 'MODEL_POLICY_MODE', 'active-only'),
     allowedModels: envCsv(env, 'ALLOWED_MODELS', []),
     rewriteRequestedModelToActive: envBool(env, 'REWRITE_REQUESTED_MODEL_TO_ACTIVE', false),
@@ -108,6 +117,8 @@ export function publicConfig(config) {
     responsesContextShift: config.responsesContextShift,
     activeModelFile: config.activeModelFile,
     hasActiveModelFallback: Boolean(config.activeModelFallback),
+    routerModelAlias: config.routerModelAlias,
+    routerModelMetadataTtlMs: config.routerModelMetadataTtlMs,
     modelPolicyMode: config.modelPolicyMode,
     allowedModels: config.allowedModels,
     rewriteRequestedModelToActive: config.rewriteRequestedModelToActive,

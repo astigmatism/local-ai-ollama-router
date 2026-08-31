@@ -23,6 +23,12 @@ import {
 import { resolveDefaultThink, thinkLevelToReasoningEffort } from './reasoning.js';
 import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
 import {
+  ActiveModelDiscovery,
+  ifNoneMatchMatches,
+  ModelDiscoveryError,
+  modelDiscoveryErrorPayload
+} from './model-discovery.js';
+import {
   copyUpstreamHeaders,
   filterRequestHeaders,
   getClientIdentity,
@@ -102,6 +108,94 @@ async function handleHealth(response, context) {
     upstream,
     activeModel
   });
+}
+
+function requestedDiscoveryModelId(pathname) {
+  if (pathname === '/v1/models') return null;
+  if (!pathname.startsWith('/v1/models/')) return undefined;
+  try {
+    return decodeURIComponent(pathname.slice('/v1/models/'.length));
+  } catch {
+    return pathname.slice('/v1/models/'.length);
+  }
+}
+
+async function recordDiscoveryFailure(context, code, warnings = [], upstreamModel = null) {
+  const signature = JSON.stringify({ code, warnings, upstreamModel });
+  if (context.state.lastDiscoveryFailureSignature === signature) return;
+  context.state.lastDiscoveryFailureSignature = signature;
+  await persistEvent(context.store, {
+    type: 'model_discovery_failed',
+    code,
+    warnings,
+    alias: context.config.routerModelAlias,
+    upstreamModel
+  });
+}
+
+async function handleModelDiscovery(request, response, pathname, context) {
+  const requestedId = requestedDiscoveryModelId(pathname);
+  try {
+    if (request.method !== 'GET') {
+      throw new ModelDiscoveryError(
+        405,
+        'METHOD_NOT_ALLOWED',
+        'The model discovery endpoint only accepts GET requests.',
+        null,
+        'invalid_request_error'
+      );
+    }
+    if (requestedId !== null && requestedId !== context.config.routerModelAlias) {
+      throw new ModelDiscoveryError(
+        404,
+        'MODEL_NOT_FOUND',
+        `Model ${JSON.stringify(requestedId)} was not found.`,
+        'model',
+        'invalid_request_error'
+      );
+    }
+
+    const discovery = await context.modelDiscovery.get();
+    const metadata = discovery.entry.x_ollama_router;
+    if (metadata.warnings.length) {
+      await recordDiscoveryFailure(
+        context,
+        'MODEL_METADATA_PARTIAL',
+        metadata.warnings,
+        metadata.upstream_model
+      );
+    } else {
+      context.state.lastDiscoveryFailureSignature = null;
+    }
+
+    const headers = {
+      'cache-control': 'no-cache',
+      etag: discovery.etag,
+      'x-ollama-router': 'local-ai-ollama-router'
+    };
+    if (ifNoneMatchMatches(request.headers['if-none-match'], discovery.etag)) {
+      response.writeHead(304, headers);
+      response.end();
+      return;
+    }
+    sendJson(
+      response,
+      200,
+      requestedId === null ? { object: 'list', data: [discovery.entry] } : discovery.entry,
+      headers
+    );
+  } catch (error) {
+    const discoveryError = error instanceof ModelDiscoveryError
+      ? error
+      : new ModelDiscoveryError(500, 'MODEL_DISCOVERY_FAILED', 'Model metadata discovery failed unexpectedly.');
+    if (discoveryError.code !== 'MODEL_NOT_FOUND' && discoveryError.code !== 'METHOD_NOT_ALLOWED') {
+      await recordDiscoveryFailure(context, discoveryError.code);
+    }
+    sendJson(response, discoveryError.statusCode, modelDiscoveryErrorPayload(discoveryError), {
+      'cache-control': 'no-cache',
+      'x-ollama-router': 'local-ai-ollama-router'
+    });
+  }
 }
 
 async function buildSummary(context) {
@@ -185,6 +279,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
 
   if (request.method === 'POST' && pathname === '/admin/api/reload-config') {
     const activeModel = await readActiveModel(context.config);
+    context.modelDiscovery.invalidate();
     await persistEvent(context.store, { type: 'active_model_marker_reloaded', activeModel });
     sendJson(response, 200, { ok: true, activeModel });
     return;
@@ -899,6 +994,11 @@ async function handleRequest(request, response, context) {
       return;
     }
 
+    if (pathname === '/v1/models' || pathname.startsWith('/v1/models/')) {
+      await handleModelDiscovery(request, response, pathname, context);
+      return;
+    }
+
     if (pathname === '/v1/chat/completions') {
       await handleProxy(request, response, url, context);
       return;
@@ -929,9 +1029,11 @@ export async function createRouterServer(config = loadConfig()) {
     config,
     store,
     metrics,
+    modelDiscovery: new ActiveModelDiscovery(config),
     state: {
       startedAt: nowIso(),
-      maintenanceMode: false
+      maintenanceMode: false,
+      lastDiscoveryFailureSignature: null
     }
   };
 
@@ -939,6 +1041,8 @@ export async function createRouterServer(config = loadConfig()) {
     type: 'router_startup',
     version: config.version,
     upstreamUrl: config.upstreamUrl,
+    routerModelAlias: config.routerModelAlias,
+    routerModelMetadataTtlMs: config.routerModelMetadataTtlMs,
     modelPolicyMode: config.modelPolicyMode,
     rewriteRequestedModelToActive: config.rewriteRequestedModelToActive,
     unsupportedToolsPolicy: config.unsupportedToolsPolicy,

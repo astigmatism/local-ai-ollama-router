@@ -28,10 +28,15 @@ The test suite validates:
 - Responses rewrite-mode forwarding for legacy nighttime, exact active, stable Codex, arbitrary, and omitted identifiers
 - streaming and non-streaming forwarding only to the active model, with unchanged Ollama residency and no model-management operation
 - strict-mode mismatch rejection independent of permissive or allowlist policy modes
+- stable-alias discovery list/detail behavior, unknown-ID and no-active errors
+- marker-aware metadata cache invalidation, source precedence, partial enrichment, and ETag revalidation
+- conservative modality and validated Responses reasoning metadata
+- exact-alias forwarding with broad requested-model rewriting disabled
+- proof that `/v1/models` never enumerates the installed `/api/tags` catalog
 - non-streaming and SSE text/function-call output
 - full-history function-result correlation by `call_id`
 - stateless, malformed-input, timeout, incomplete-stream, and cancellation behavior
-- regression coverage proving existing `/api/*` and `/v1/models` behavior is unchanged
+- regression coverage proving existing `/api/*`, streaming, policy, and admin behavior remains unchanged
 
 ## Docker build test
 

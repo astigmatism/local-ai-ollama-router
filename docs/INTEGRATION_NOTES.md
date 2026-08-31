@@ -30,7 +30,13 @@ If Open WebUI sends native tools to a deployed model that advertises only `compl
 
 ## Codex
 
-With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, configure Codex's custom Responses provider with a stable identifier such as `model = "local-active"`. Codex may retain that identifier across day/night profile changes: request history records it as `requestedModel`, while `activeModel` and `forwardedModel` show the marker model that Ollama actually received. Strict mode remains available by setting the flag to `false`.
+Configure Codex's custom Responses provider with the exact `ROUTER_MODEL_ALIAS`, normally `model = "local-active"`. Codex may retain that identifier across profile changes: request history records it as `requestedModel`, while `activeModel` and `forwardedModel` show the marker model that Ollama actually received. The alias works in strict mode; `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` is needed only if other arbitrary names should also be advisory.
+
+## DeepSeek Harness
+
+The router now publishes the active alias and dynamic capabilities through `GET /v1/models/{alias}`, but it does not automatically reconfigure DeepSeek Harness. Harness requires a separate consumer-side enhancement.
+
+That consumer should configure only the stable alias, fetch its entry at startup and at the beginning of a new request or session, and use ETag revalidation. It should apply `context_window`, `max_output_tokens`, `input_modalities`, and reasoning metadata when available, retain last-safe limits or fall back conservatively when metadata is incomplete, and refresh safely after active-model changes. It must not persist `upstream_model` as its configured model ID. See [Stable Active-Model Discovery](MODEL_DISCOVERY.md) for the complete contract.
 
 ## ComfyUI
 

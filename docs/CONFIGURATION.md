@@ -51,14 +51,19 @@ The router uses Node's native HTTP transport for all Ollama calls, so `OLLAMA_UP
 |---|---:|---|
 | `ACTIVE_MODEL_FILE` | `/app/runtime/active-model.json` | Marker file written by deployment/profile system. |
 | `ACTIVE_MODEL` | empty | Temporary fallback only. |
+| `ROUTER_MODEL_ALIAS` | `local-active` | Non-empty, stable public ID for the active router slot. Exact requests for this alias always resolve to the active physical model. |
+| `ROUTER_MODEL_METADATA_TTL_MS` | `5000` | Cache lifetime in milliseconds for `/api/ps` and `/api/show` discovery enrichment. Marker changes invalidate immediately regardless of TTL. |
 
 Marker format:
 
 ```json
 {
-  "profile": "nighttime",
-  "model": "qwen3.8-27b-uncensored:night",
+  "profile": "example-profile",
+  "model": "model-a:test",
   "keep_alive": -1,
+  "context_length": 16384,
+  "max_output_tokens": 2048,
+  "input_modalities": ["text"],
   "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
@@ -73,7 +78,7 @@ Marker format:
 }
 ```
 
-The dashboard also displays optional context hints if the marker includes fields such as `context`, `num_ctx`, `numCtx`, or `options.num_ctx`.
+The canonical optional discovery fields are `context_length`, `max_output_tokens`, `input_modalities`, and `revision`. Existing context hints (`context`, `num_ctx`, `numCtx`, or `options.num_ctx`) remain accepted, as do the documented compatibility aliases in [Stable Active-Model Discovery](MODEL_DISCOVERY.md). Older markers do not need any new field.
 
 Reasoning capability metadata belongs to the active deployment profile; the router does not infer it from `model` or `profile` names. `supported_think_levels` and `reasoning_effort_map` must appear together. The map must define `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A string target must be listed in `supported_think_levels`; boolean `true` selects the model/runtime's enabled default reasoning mode and need not be listed. No other boolean target is valid. `none` is not part of the map because it always becomes boolean `false`. Invalid/incomplete profiles fail generation with HTTP 503 before an upstream generation request.
 
@@ -85,7 +90,7 @@ For manual marker updates, `scripts/write-active-model.sh` accepts a capability 
 |---|---:|---|
 | `MODEL_POLICY_MODE` | `active-only` | `active-only`, `allowlist`, or `permissive`. |
 | `ALLOWED_MODELS` | empty | CSV of additional models for `allowlist` mode or exceptions. |
-| `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, client model names are advisory and model-bearing requests—including `/v1/responses` and `/responses`—forward only the active marker model. Responses also accepts an omitted model. When false, Responses rejects mismatches but still accepts an exact or omitted model. |
+| `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, all non-empty client model names are advisory and model-bearing requests—including `/v1/responses` and `/responses`—forward only the active marker model. The exact `ROUTER_MODEL_ALIAS` always resolves to active even when this broader behavior is false; other mismatches retain strict policy behavior. Responses also accepts an omitted model. |
 | `FORCE_KEEP_ALIVE` | `-1` | Forwarded keep-alive for active protected requests. |
 | `UNSUPPORTED_TOOLS_POLICY` | `passthrough` | `passthrough`, `drop`, or `reject`. When the rewritten active model lacks `tools`, drop mode removes native tool controls and reject mode returns a router error. Unsupported prior tool-use history is always rejected explicitly. |
 | `PROTECTED_MODEL_ENDPOINTS` | `/api/chat,/api/generate,/api/embed,/api/embeddings` | Endpoints receiving keep-alive rewrite. |

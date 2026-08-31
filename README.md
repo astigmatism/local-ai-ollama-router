@@ -21,6 +21,10 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
   - `POST /v1/responses`
   - `POST /responses` alias
   - streamed text and function calls translated to and from Ollama `/api/chat`
+- Stable active-slot model discovery:
+  - `GET /v1/models`
+  - `GET /v1/models/{alias}`
+  - one configurable public alias enriched from the active marker, Ollama `/api/ps`, and `/api/show`
 - Separate browser admin portal, normally `http://192.168.1.21:11435/` or `http://192.168.1.21:11435/admin`.
 - No token or login for the browser admin portal. It is intended for trusted local/LAN use only.
 - Active-model fail-closed policy by default.
@@ -51,7 +55,7 @@ cd /home/astigmatism/apps/local-ai-ollama-router
 cp .env.example .env
 
 # Write an active model marker for initial testing:
-./scripts/write-active-model.sh 'qwen3.8-27b-uncensored:night' nighttime medium \
+./scripts/write-active-model.sh 'model-a:test' example-profile medium \
   runtime/reasoning-capabilities.night.example.json
 
 docker compose --env-file .env up --build -d
@@ -78,9 +82,12 @@ Example marker:
 
 ```json
 {
-  "profile": "nighttime",
-  "model": "qwen3.8-27b-uncensored:night",
+  "profile": "example-profile",
+  "model": "model-a:test",
   "keep_alive": -1,
+  "context_length": 16384,
+  "max_output_tokens": 2048,
+  "input_modalities": ["text"],
   "default_think": "medium",
   "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
@@ -95,6 +102,12 @@ Example marker:
   "source": "local-ai-config.sh apply nighttime"
 }
 ```
+
+## Stable public model alias
+
+`ROUTER_MODEL_ALIAS` defaults to `local-active`. It names the router's active slot, not an installed Ollama model. The exact alias resolves to the current marker model on Responses, native chat/generate/embed/embeddings/show, and OpenAI chat-completions requests even when `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`. That strict setting still rejects other mismatched names; setting it to `true` preserves the broader compatibility behavior where every non-empty requested name is advisory.
+
+`GET /v1/models` returns exactly this one alias, and `GET /v1/models/local-active` returns the same entry with current context, modality, capability, and reasoning metadata. Physical models remain visible through native Ollama routes such as `/api/tags`; they are never enumerated by the OpenAI discovery endpoint. See [Stable Active-Model Discovery](docs/MODEL_DISCOVERY.md) for the schema, source precedence, partial-data rules, caching, and downstream integration guidance.
 
 `ACTIVE_MODEL` exists only as a temporary fallback. Prefer the file marker so the router does not invent model selection.
 
@@ -124,6 +137,7 @@ The default policy is intentionally conservative:
 
 ```text
 MODEL_POLICY_MODE=active-only
+ROUTER_MODEL_ALIAS=local-active
 REWRITE_REQUESTED_MODEL_TO_ACTIVE=false
 FORCE_KEEP_ALIVE=-1
 DEFAULT_THINK=
@@ -133,9 +147,9 @@ ALLOW_MODEL_MANAGEMENT=false
 USE_ACTIVE_MODEL_WHEN_MISSING=false
 ```
 
-For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
+For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the default policy accepts the exact active model or the exact public alias. The alias is resolved before policy enforcement. If the request targets the active slot, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` when compatibility clients such as Codex or Open WebUI should use a stable configured name without controlling the deployed Ollama model. In that mode, the router treats the requested model as advisory and forwards only the active marker model for native generation/embed requests, `/api/show`, `/v1/chat/completions`, `/v1/responses`, and `/responses`. Responses requests may omit `model` or supply any non-empty identifier. Other request parameters are preserved. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
+The exact `ROUTER_MODEL_ALIAS` always forwards only to the active marker model. Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` only when compatibility clients such as Open WebUI should also be allowed to send other advisory model names. In that broader mode, the router replaces any non-empty requested model on native generation/embed requests, `/api/show`, `/v1/chat/completions`, `/v1/responses`, and `/responses`. Other request parameters are preserved. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
 
 `UNSUPPORTED_TOOLS_POLICY` controls native tools on `/api/chat`, `/v1/chat/completions`, `/v1/responses`, and `/responses`. Its backward-compatible default, `passthrough`, leaves tool fields unchanged. `drop` removes `tools`, tool-choice/parallel controls, and legacy equivalents only when the rewritten active model's `/api/show` response does not advertise `tools`; `reject` returns a router error instead. Tool-capable models preserve tool fields. Prior tool-call/output history is never silently removed: an unsupported active model receives `UNSUPPORTED_TOOL_HISTORY` for such a conversation under every policy. Tool-free requests do not perform a tool capability lookup.
 
@@ -145,7 +159,7 @@ Ollama's advertised `thinking` capability remains the binary enabled/disabled ch
 
 ## Codex CLI through the Responses API
 
-The Responses adapter always calls only Ollama `/api/chat` with the active marker model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, an omitted model or any non-empty client identifier is replaced with the marker model. With the flag set to `false`, an omitted model or the exact active model is accepted and a mismatch receives HTTP 400 `MODEL_NOT_ACTIVE`. `MODEL_POLICY_MODE` and `ALLOWED_MODELS` do not broaden this boundary. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
+The Responses adapter always calls only Ollama `/api/chat` with the active marker model and `FORCE_KEEP_ALIVE`; it contains no pull, switch, fallback, or direct-upstream path. With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, an omitted model or any non-empty client identifier is replaced with the marker model. With the flag set to `false`, an omitted model, the exact public alias, or the exact active model is accepted; other mismatches receive HTTP 400 `MODEL_NOT_ACTIVE`. `MODEL_POLICY_MODE` and `ALLOWED_MODELS` do not broaden this boundary. Codex/Responses requests send `shift: false` by default; set `RESPONSES_CONTEXT_SHIFT=true` only to opt back into silent context shifting.
 
 Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Ollama's aggregate `prompt_eval_count` and `eval_count` map exactly to Responses input, output, and total usage so Codex can track context and compact long reasoning sessions. Ollama does not expose the split between reasoning and visible output; when thinking is present, the adapter conservatively attributes all aggregate output tokens to `reasoning_tokens` without changing the exact output or total counts. A thinking-only, whitespace-only, or otherwise blank result with no function call fails as `EMPTY_UPSTREAM_RESPONSE` instead of succeeding with an empty assistant message.
 
@@ -166,7 +180,7 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-This stable identifier requires `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`; day/night marker changes then require no Codex configuration change. `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. It also deliberately omits `/v1/models` because the client model name is not a deployment catalog or model-selection mechanism.
+The exact stable identifier works whether broad requested-model rewriting is enabled or disabled; day/night marker changes require no Codex configuration change. `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. `/v1/models` publishes only the stable active-slot alias and its dynamic metadata, never a selectable catalog of physical Ollama models.
 
 Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: true` for the nighttime profile and `think: "max"` for the daytime profile above.
 
@@ -210,7 +224,7 @@ Because the portal is unauthenticated by design, expose `11435` only on trusted 
 ```bash
 ROUTER_URL=http://192.168.1.21:11434 \
 ADMIN_URL=http://192.168.1.21:11435 \
-./scripts/curl-smoke-test.sh 'hauhau-qwen3.6-35b-a3b-aggressive-q4-k-m:qwen35-parser'
+./scripts/curl-smoke-test.sh 'model-a:test'
 ```
 
 Run the Responses text-and-tool-cycle smoke test without changing the active model:

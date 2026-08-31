@@ -34,13 +34,16 @@ This is enforced at the router so individual clients do not need to remember or 
 `src/policy.js` validates model requests. The default policy is `active-only`:
 
 - active model request: allowed
-- non-active model request: rejected
+- exact public alias: resolved to the active model and allowed
+- other non-active model request: rejected
 - protected active model request: `keep_alive` overwritten to `-1`
 - model-management endpoint: disabled by default
 
 ### Active model reader
 
 `src/active-model.js` reads `/app/runtime/active-model.json` or falls back to `ACTIVE_MODEL`. The deployment/profile system should write the marker.
+
+`src/model-discovery.js` turns that active slot into the stable `ROUTER_MODEL_ALIAS`. It re-reads the marker before every catalog response, enriches only with read-only Ollama `/api/ps` and `/api/show` calls, and caches the normalized entry by physical model plus marker revision. The OpenAI catalog contains exactly one alias; `/api/tags` and other native Ollama status routes retain their existing physical-model behavior.
 
 `src/native-tools.js` inspects only native tool-control metadata and prior tool-history markers. The generic proxy and Responses adapter invoke it after resolving/replacing the client model name. A lazy per-request `/api/show` lookup is shared with thinking normalization, so requests containing both enabled thinking and tools issue one capability query and requests containing neither issue none. Unsupported history is rejected rather than rewritten; drop events contain counts and booleans, never schemas, arguments, prompts, or message content.
 
@@ -75,6 +78,8 @@ POST /api/embeddings
 POST /v1/chat/completions
 POST /v1/responses
 POST /responses
+GET  /v1/models
+GET  /v1/models/{alias}
 ```
 
 Disabled/admin-gated model-management routes:

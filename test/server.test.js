@@ -828,7 +828,7 @@ test('OpenAI chat completions applies tool policy for streaming and non-streamin
   }
 });
 
-test('Responses compatibility does not change existing model discovery, inspection, generation, or management routes', async () => {
+test('Responses compatibility preserves native routes while public discovery exposes only the stable alias', async () => {
   const fixture = await makeFixture();
   try {
     const version = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/version`);
@@ -889,8 +889,10 @@ test('Responses compatibility does not change existing model discovery, inspecti
     assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/pull'), false);
 
     const codexCatalog = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
-    assert.equal(codexCatalog.status, 404);
-    assert.equal((await codexCatalog.json()).error.code, 'NOT_FOUND');
+    assert.equal(codexCatalog.status, 200);
+    const catalog = await codexCatalog.json();
+    assert.deepEqual(catalog.data.map((model) => model.id), ['local-active']);
+    assert.equal(JSON.stringify(catalog).includes('catalog:model'), false);
 
     const adminResponses = await fetch(`http://127.0.0.1:${fixture.adminPort}/v1/responses`, {
       method: 'POST',
@@ -907,7 +909,9 @@ test('Responses compatibility does not change existing model discovery, inspecti
         'GET /api/tags',
         'GET /api/ps',
         'POST /api/show',
-        'POST /api/generate'
+        'POST /api/generate',
+        'GET /api/ps',
+        'POST /api/show'
       ]
     );
   } finally {

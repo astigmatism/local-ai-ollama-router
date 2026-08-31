@@ -42,7 +42,7 @@ Passes through to raw Ollama.
 
 ### `POST /api/show`
 
-Passes through to raw Ollama. This endpoint is considered safe/status-like by default. When `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, `/api/show` model names are also rewritten to the active model.
+Passes through to raw Ollama. This endpoint is considered safe/status-like by default. The exact `ROUTER_MODEL_ALIAS` always resolves to the active model; when `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, other `/api/show` model names are also rewritten.
 
 ### `POST /api/chat`
 
@@ -50,7 +50,7 @@ Policy-enforced. Default behavior:
 
 - requires JSON body
 - requires `body.model`
-- rejects non-active model
+- accepts the exact active model or exact `ROUTER_MODEL_ALIAS`; rejects other non-active models under the default policy
 - overwrites `keep_alive` to `-1` for active model
 - preserves non-model request fields such as `messages`, `stream`, `options`, and `format`
 - accepts `think` as `true`, `false`, or a supported reasoning effort string
@@ -92,14 +92,15 @@ All Ollama upstream calls use Node's native HTTP transport. The configured `OLLA
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
 
-`GET /v1/models` is intentionally not implemented. When request-model rewriting is enabled, Codex can be configured with a stable identifier such as `local-active`; that identifier is advisory and is not an Ollama model catalog entry. A conventional OpenAI model-list response is not a compatible substitute for Codex's separate model-catalog schema.
+The router also implements `GET /v1/models` and `GET /v1/models/{alias}`. They publish exactly one stable active-slot alias with dynamically discovered metadata; they do not enumerate or permit selection of installed physical models. The full schema and field semantics are documented in [Stable Active-Model Discovery](MODEL_DISCOVERY.md).
 
 ### Active-model routing rules
 
 - An omitted `model` resolves to the current active-model marker.
 - The exact active model is accepted.
+- The exact `ROUTER_MODEL_ALIAS` is accepted and replaced with the active physical model even when broad rewriting is disabled.
 - With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true`, every non-empty client model identifier is accepted and replaced with the active marker model.
-- With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`, every mismatched model receives HTTP 400 `MODEL_NOT_ACTIVE`.
+- With `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`, every other mismatched model receives HTTP 400 `MODEL_NOT_ACTIVE`.
 - A missing active marker receives HTTP 503 `NO_ACTIVE_MODEL`.
 - Ollama always receives the active model, the configured `FORCE_KEEP_ALIVE` value, and `shift: false` by default. `RESPONSES_CONTEXT_SHIFT=true` is an explicit opt-in to the old shifting behavior.
 - Responses requests never invoke model pull, create, copy, push, delete, fallback, or switching logic.
@@ -110,7 +111,7 @@ All Ollama upstream calls use Node's native HTTP transport. The configured `OLLA
 
 | Field | Behavior |
 |---|---|
-| `model` | Optional. In rewrite mode any non-empty identifier is advisory; in strict mode it must exactly match the active model. Ollama always receives the marker model. |
+| `model` | Optional. The stable alias and exact active model are accepted in strict mode; in broad rewrite mode any non-empty identifier is advisory. Ollama always receives the marker model. |
 | `input` | Required string or array of supported input items. |
 | `instructions` | Prepended as a system message without removing developer/system input. |
 | `stream` | `false` by default; `true` produces Responses SSE events. |
@@ -216,7 +217,7 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` for this stable-name configuration. `/v1/models` is not required for this provider shape. `model_reasoning_effort = "none"` is recommended for deterministic local tool use; explicit supported efforts are forwarded to Ollama when reasoning is wanted. Streaming function-call `response.output_item.done` events carry the completed call that Codex executes; a later request returns the tool result as `function_call_output`.
+This exact stable-name configuration works with either value of `REWRITE_REQUESTED_MODEL_TO_ACTIVE`; enable broad rewriting only for clients that must send other advisory IDs. `model_reasoning_effort = "none"` is recommended for deterministic local tool use; explicit supported efforts are forwarded to Ollama when reasoning is wanted. Streaming function-call `response.output_item.done` events carry the completed call that Codex executes; a later request returns the tool result as `function_call_output`.
 
 ### Responses error shape
 

@@ -22,6 +22,15 @@ export const MODEL_BODY_ROUTES = new Set([
   'POST /v1/chat/completions'
 ]);
 
+const PUBLIC_ALIAS_ROUTES = new Set([
+  'POST /api/chat',
+  'POST /api/generate',
+  'POST /api/embed',
+  'POST /api/embeddings',
+  'POST /api/show',
+  'POST /v1/chat/completions'
+]);
+
 export function routeKey(method, pathname) {
   return `${String(method).toUpperCase()} ${pathname}`;
 }
@@ -56,7 +65,25 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
   const key = routeKey(method, pathname);
   const activeModel = activeModelInfo?.model || null;
   const requestedModel = getRequestedModel(body);
+  const publicAliasRequested = PUBLIC_ALIAS_ROUTES.has(key)
+    && requestedModel === config.routerModelAlias;
   const incomingKeepAlive = body && typeof body === 'object' && Object.hasOwn(body, 'keep_alive') ? body.keep_alive : undefined;
+
+  if (publicAliasRequested && !activeModel) {
+    return {
+      allowed: false,
+      status: 503,
+      code: 'NO_ACTIVE_MODEL',
+      message: 'No active model marker is available. The router fails closed by default.',
+      requestedModel,
+      forwardedModel: null,
+      activeModel,
+      incomingKeepAlive,
+      forwardedKeepAlive: undefined,
+      sanitizedBody: body,
+      modelRewritten: false
+    };
+  }
 
   if (MODEL_MANAGEMENT_ROUTES.has(key)) {
     if (!config.allowModelManagement) {
@@ -108,7 +135,14 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
     let forwardedModel = requestedModel;
     let modelRewritten = false;
 
-    if (key === 'POST /api/show' && body && typeof body === 'object' && !Array.isArray(body) && activeModel && config.rewriteRequestedModelToActive) {
+    if (
+      key === 'POST /api/show'
+      && body
+      && typeof body === 'object'
+      && !Array.isArray(body)
+      && activeModel
+      && (config.rewriteRequestedModelToActive || publicAliasRequested)
+    ) {
       sanitizedBody = cloneJson(body);
       if (requestedModel !== activeModel) {
         sanitizedBody.model = activeModel;
@@ -167,7 +201,7 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
   let modelRewritten = false;
   const sanitizedBody = cloneJson(body);
 
-  if (activeModel && config.rewriteRequestedModelToActive) {
+  if (activeModel && (config.rewriteRequestedModelToActive || publicAliasRequested)) {
     if (effectiveModel !== activeModel) {
       sanitizedBody.model = activeModel;
       effectiveModel = activeModel;

@@ -435,7 +435,8 @@ export function translateResponsesRequest(
   forcedKeepAlive,
   defaultThink,
   contextShift = false,
-  rewriteRequestedModelToActive = false
+  rewriteRequestedModelToActive = false,
+  routerModelAlias = null
 ) {
   if (arguments.length < 4) defaultThink = false;
   if (!isPlainObject(body)) invalid('INVALID_REQUEST_BODY', 'The request body must be a JSON object.');
@@ -449,7 +450,8 @@ export function translateResponsesRequest(
   if (body.model !== undefined && (typeof body.model !== 'string' || !body.model.trim())) {
     invalid('INVALID_MODEL', 'model must be a non-empty string when provided.', 'model');
   }
-  if (!rewriteRequestedModelToActive && body.model && body.model !== activeModel) {
+  const publicAliasRequested = body.model === routerModelAlias;
+  if (!rewriteRequestedModelToActive && !publicAliasRequested && body.model && body.model !== activeModel) {
     invalid('MODEL_NOT_ACTIVE', 'Requested model is not the active deployed model for this router profile.', 'model');
   }
   if (body.input === undefined || body.input === null) invalid('INPUT_REQUIRED', 'input is required.', 'input');
@@ -494,7 +496,7 @@ export function translateResponsesRequest(
     reasoningEffort: reasoningTranslation.effectiveReasoningEffort,
     requestedModel,
     forwardedModel: activeModel,
-    modelRewritten: rewriteRequestedModelToActive && requestedModel !== activeModel,
+    modelRewritten: (rewriteRequestedModelToActive || publicAliasRequested) && requestedModel !== activeModel,
     stream: body.stream === true,
     toolChoice: translatedTools.toolChoice,
     parallelToolCalls: body.parallel_tool_calls ?? true,
@@ -1105,7 +1107,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
       context.config.forcedKeepAlive,
       defaultThink,
       context.config.responsesContextShift,
-      context.config.rewriteRequestedModelToActive
+      context.config.rewriteRequestedModelToActive,
+      context.config.routerModelAlias
     );
     let thinkPolicy;
     try {

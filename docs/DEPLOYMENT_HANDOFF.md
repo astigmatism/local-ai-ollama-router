@@ -44,18 +44,20 @@ ADMIN_PORT=11435
 ADMIN_PUBLIC_PORT=11435
 OLLAMA_UPSTREAM_URL=http://ollama:11434
 UNIFIED_MODELS_DIR=<actual unified model directory>
+ROUTER_MODEL_ALIAS=local-active
+ROUTER_MODEL_METADATA_TTL_MS=5000
 REWRITE_REQUESTED_MODEL_TO_ACTIVE=true
 ALLOW_MODEL_MANAGEMENT=false
 ```
 
-`REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` is the production compatibility setting for a stable Codex identifier. It does not select or load the marker model; it only makes the client identifier advisory. The deployment/profile system remains the sole writer of `active-model.json`.
+The exact `ROUTER_MODEL_ALIAS` is stable with either value of `REWRITE_REQUESTED_MODEL_TO_ACTIVE`. The broader `true` setting remains useful for compatibility clients that send other advisory names. Neither setting selects or loads the marker model; the deployment/profile system remains the sole writer of `active-model.json`.
 
 ## Phase 2: active model marker
 
 The long-term owner should be `local-ai-config.sh` or `deploy-runtime.sh`. For the first test, write the marker manually:
 
 ```bash
-./scripts/write-active-model.sh 'qwen3.8-27b-uncensored:night' nighttime medium \
+./scripts/write-active-model.sh 'model-a:test' example-profile medium \
   runtime/reasoning-capabilities.night.example.json
 ```
 
@@ -123,7 +125,7 @@ REQUESTED_MODEL=local-active \
 
 Verify request history records `requestedModel: local-active`, `activeModel` and `forwardedModel` equal to the marker model, `modelRewritten: true`, and successful status/reasoning fields. Compare `ollama ps` before and after: only the active model should be resident and its lifetime should remain `Forever`. Also confirm no `/api/pull`, `/api/create`, `/api/copy`, `/api/push`, or `/api/delete` reached raw Ollama.
 
-Strict-mode rollback is configuration-only: set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false`, restart the router, and configure Codex with the exact active marker model. In that mode, mismatches return `MODEL_NOT_ACTIVE`, while exact and omitted Responses models remain accepted.
+Strict-mode rollback is configuration-only: set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=false` and restart the router. Codex can keep the exact stable alias; other mismatched IDs return `MODEL_NOT_ACTIVE`, while the alias, exact active model, and omitted Responses model remain accepted.
 
 ## Phase 4: keep-alive enforcement test
 
@@ -252,7 +254,8 @@ Once the router admin UI covers the needed portal features, stop publishing `loc
 - Voice assistant calls the router.
 - Streaming and non-streaming responses work.
 - With Responses rewriting enabled, `local-active`, arbitrary non-empty identifiers, and an omitted model all forward only the active marker model.
-- With Responses rewriting disabled, mismatched identifiers return `MODEL_NOT_ACTIVE`; exact and omitted models still work.
+- With Responses rewriting disabled, mismatched identifiers return `MODEL_NOT_ACTIVE`; the stable alias, exact active model, and omitted models still work.
+- `/v1/models` returns only the stable alias and revalidates dynamic metadata with ETags.
 - Active model requests without `keep_alive` are forwarded with `-1`.
 - Active model requests with finite `keep_alive` are forwarded with `-1`.
 - Non-active model requests are rejected by default.
