@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { parseDefaultThink } from './reasoning.js';
+import { UNSUPPORTED_TOOLS_POLICIES } from './native-tools.js';
 
 function envString(env, key, fallback) {
   const value = env[key];
@@ -25,6 +26,12 @@ function envCsv(env, key, fallback = []) {
   const raw = envString(env, key, '');
   if (!raw) return [...fallback];
   return raw.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function envEnum(env, key, fallback, allowed) {
+  const value = envString(env, key, fallback).toLowerCase();
+  if (allowed.has(value)) return value;
+  throw new TypeError(`${key} must be one of: ${[...allowed].join(', ')}. Received: ${JSON.stringify(value)}.`);
 }
 
 export function parseKeepAlive(value) {
@@ -64,6 +71,7 @@ export function loadConfig(env = process.env) {
     forcedKeepAlive: parseKeepAlive(envString(env, 'FORCE_KEEP_ALIVE', '-1')),
     defaultThinkConfigured,
     defaultThink: defaultThinkConfigured ? parseDefaultThink(defaultThinkRaw) : undefined,
+    unsupportedToolsPolicy: envEnum(env, 'UNSUPPORTED_TOOLS_POLICY', 'passthrough', UNSUPPORTED_TOOLS_POLICIES),
     protectedModelEndpoints: envCsv(env, 'PROTECTED_MODEL_ENDPOINTS', ['/api/chat', '/api/generate', '/api/embed', '/api/embeddings']),
     useActiveModelWhenMissing: envBool(env, 'USE_ACTIVE_MODEL_WHEN_MISSING', false),
     allowModelManagement: envBool(env, 'ALLOW_MODEL_MANAGEMENT', false),
@@ -106,6 +114,7 @@ export function publicConfig(config) {
     forcedKeepAlive: config.forcedKeepAlive,
     defaultThinkConfigured: config.defaultThinkConfigured,
     defaultThink: config.defaultThink ?? null,
+    unsupportedToolsPolicy: config.unsupportedToolsPolicy,
     protectedModelEndpoints: config.protectedModelEndpoints,
     useActiveModelWhenMissing: config.useActiveModelWhenMissing,
     allowModelManagement: config.allowModelManagement,

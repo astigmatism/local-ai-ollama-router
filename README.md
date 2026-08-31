@@ -127,6 +127,7 @@ MODEL_POLICY_MODE=active-only
 REWRITE_REQUESTED_MODEL_TO_ACTIVE=false
 FORCE_KEEP_ALIVE=-1
 DEFAULT_THINK=
+UNSUPPORTED_TOOLS_POLICY=passthrough
 RESPONSES_CONTEXT_SHIFT=false
 ALLOW_MODEL_MANAGEMENT=false
 USE_ACTIVE_MODEL_WHEN_MISSING=false
@@ -134,7 +135,9 @@ USE_ACTIVE_MODEL_WHEN_MISSING=false
 
 For `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, and `POST /api/embeddings`, the router allows the request only when `body.model` equals the active model. If the request is allowed and targets the active model, the router forwards it with `keep_alive: -1`, regardless of whether the client omitted `keep_alive` or sent a finite value such as `5m`.
 
-Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` when compatibility clients such as Codex or Open WebUI should use a stable configured name without controlling the deployed Ollama model. In that mode, the router treats the requested model as advisory and forwards only the active marker model for native generation/embed requests, `/api/show`, `/v1/responses`, and `/responses`. Responses requests may omit `model` or supply any non-empty identifier. Other request parameters are preserved. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
+Set `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` when compatibility clients such as Codex or Open WebUI should use a stable configured name without controlling the deployed Ollama model. In that mode, the router treats the requested model as advisory and forwards only the active marker model for native generation/embed requests, `/api/show`, `/v1/chat/completions`, `/v1/responses`, and `/responses`. Responses requests may omit `model` or supply any non-empty identifier. Other request parameters are preserved. For `/api/chat` and `/api/generate`, boolean `think` controls are preserved, while string controls are negotiated through the active profile. The router then checks `/api/show` and drops enabled thinking when the model does not advertise the `thinking` capability.
+
+`UNSUPPORTED_TOOLS_POLICY` controls native tools on `/api/chat`, `/v1/chat/completions`, `/v1/responses`, and `/responses`. Its backward-compatible default, `passthrough`, leaves tool fields unchanged. `drop` removes `tools`, tool-choice/parallel controls, and legacy equivalents only when the rewritten active model's `/api/show` response does not advertise `tools`; `reject` returns a router error instead. Tool-capable models preserve tool fields. Prior tool-call/output history is never silently removed: an unsupported active model receives `UNSUPPORTED_TOOL_HISTORY` for such a conversation under every policy. Tool-free requests do not perform a tool capability lookup.
 
 Native `/api/chat` and `/api/generate` requests may set `think` to a boolean or a reasoning effort string. Responses requests use `reasoning.effort` or the `reasoning_effort` compatibility alias. `none` always maps to `false`; every string effort is mapped by the active profile, so the same incoming `max` can become boolean `true` at night and remain the string `"max"` during the day. Explicit request values win over defaults. If omitted, an active marker's `default_think` wins over `DEFAULT_THINK`. When neither default is configured, native Ollama requests omit `think`, while the Responses adapter retains its existing `think: false` default. Set `DEFAULT_THINK=model-default` to omit the field across both protocols.
 

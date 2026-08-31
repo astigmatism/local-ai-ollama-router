@@ -18,7 +18,8 @@ export const MODEL_BODY_ROUTES = new Set([
   'POST /api/chat',
   'POST /api/generate',
   'POST /api/embed',
-  'POST /api/embeddings'
+  'POST /api/embeddings',
+  'POST /v1/chat/completions'
 ]);
 
 export function routeKey(method, pathname) {
@@ -250,6 +251,7 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
 }
 
 export function isLikelyStreamingRequest(pathname, body) {
+  if (pathname === '/v1/chat/completions') return body?.stream === true;
   if (!['/api/chat', '/api/generate', '/api/pull', '/api/create'].includes(pathname)) return false;
   if (!body || typeof body !== 'object') return false;
   return body.stream !== false;

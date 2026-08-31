@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
-import { normalizeThinkForModel, upstreamFetch } from './upstream.js';
+import { createModelCapabilityLookup, normalizeThinkForModel, upstreamFetch } from './upstream.js';
+import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
 import {
   RESPONSES_REASONING_EFFORTS,
   thinkLevelToReasoningEffort,
@@ -478,6 +479,9 @@ export function translateResponsesRequest(
     shift: contextShift,
     keep_alive: forcedKeepAlive,
     ...(translatedTools.tools.length ? { tools: translatedTools.tools } : {}),
+    ...(Object.hasOwn(body, 'tool_choice') ? { tool_choice: body.tool_choice } : {}),
+    ...(Object.hasOwn(body, 'parallel_tool_calls') ? { parallel_tool_calls: body.parallel_tool_calls } : {}),
+    ...(Object.hasOwn(body, 'max_tool_calls') ? { max_tool_calls: body.max_tool_calls } : {}),
     ...(Object.keys(options).length ? { options } : {}),
     ...(format === undefined ? {} : { format }),
     ...(think === undefined ? {} : { think })
@@ -1014,7 +1018,8 @@ function attachAbort(request, response, timeoutMs) {
   };
 }
 
-function outcomeBase(started, pathname, body, activeModel, translated) {
+function outcomeBase(started, pathname, body, activeModel, translated, toolPolicy = null) {
+  const tools = toolPolicy || translated || emptyToolPolicy(body, null);
   return {
     endpoint: pathname,
     activeModel,
@@ -1032,6 +1037,13 @@ function outcomeBase(started, pathname, body, activeModel, translated) {
     thinkNormalized: translated?.thinkNormalized ?? false,
     thinkingSupported: translated?.thinkingSupported ?? null,
     reasoningEffort: translated?.reasoningEffort ?? null,
+    toolsPresent: tools.toolsPresent,
+    toolCount: tools.toolCount,
+    toolChoicePresent: tools.toolChoicePresent,
+    toolHistoryPresent: tools.toolHistoryPresent,
+    toolsSupported: tools.toolsSupported,
+    toolsDropped: tools.toolsDropped,
+    unsupportedToolsPolicy: tools.unsupportedToolsPolicy,
     streaming: translated?.stream ?? body?.stream === true,
     bodySummary: summarizeBody(body, 'metadata'),
     latencyMs: Date.now() - started
@@ -1043,6 +1055,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
   let body = null;
   let activeModelInfo = null;
   let translated = null;
+  let toolPolicy = emptyToolPolicy(null, context.config.unsupportedToolsPolicy);
   let abortState = null;
   let writer = null;
 
@@ -1058,11 +1071,28 @@ export async function handleResponsesRequest(request, response, pathname, contex
       if (error instanceof SyntaxError) throw new ResponsesApiError(400, 'INVALID_JSON_BODY', 'Request body is not valid JSON.', null);
       throw new ResponsesApiError(error.statusCode || 400, 'INVALID_REQUEST_BODY', error.message, null);
     }
+    toolPolicy = emptyToolPolicy(body, context.config.unsupportedToolsPolicy);
 
     activeModelInfo = await readActiveModel(context.config);
     if (context.state.maintenanceMode) {
       throw new ResponsesApiError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.', null, 'server_error');
     }
+    const capabilityLookup = createModelCapabilityLookup(context.config, activeModelInfo.model);
+    try {
+      toolPolicy = await normalizeToolsForModel(
+        body,
+        activeModelInfo.model,
+        context.config.unsupportedToolsPolicy,
+        capabilityLookup
+      );
+    } catch (error) {
+      if (error.code === 'UNSUPPORTED_TOOLS' || error.code === 'UNSUPPORTED_TOOL_HISTORY') {
+        toolPolicy = { ...toolPolicy, toolsSupported: false };
+        throw new ResponsesApiError(error.statusCode, error.code, error.message, error.param);
+      }
+      throw error;
+    }
+
     let defaultThink;
     try {
       defaultThink = resolveDefaultThink(activeModelInfo, context.config, false);
@@ -1070,7 +1100,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       throw new ResponsesApiError(503, 'INVALID_ACTIVE_MODEL_THINK_DEFAULT', error.message, 'reasoning', 'server_error');
     }
     translated = translateResponsesRequest(
-      body,
+      toolPolicy.body,
       activeModelInfo.model,
       context.config.forcedKeepAlive,
       defaultThink,
@@ -1083,7 +1113,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
         context.config,
         activeModelInfo.model,
         translated.upstreamBody,
-        activeModelInfo
+        activeModelInfo,
+        capabilityLookup
       );
     } catch (error) {
       throw new ResponsesApiError(
@@ -1101,6 +1132,13 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.thinkDropped = thinkPolicy.thinkDropped;
     translated.thinkNormalized = thinkPolicy.thinkNormalized;
     translated.thinkingSupported = thinkPolicy.thinkingSupported;
+    translated.toolsPresent = toolPolicy.toolsPresent;
+    translated.toolCount = toolPolicy.toolCount;
+    translated.toolChoicePresent = toolPolicy.toolChoicePresent;
+    translated.toolHistoryPresent = toolPolicy.toolHistoryPresent;
+    translated.toolsSupported = toolPolicy.toolsSupported;
+    translated.toolsDropped = toolPolicy.toolsDropped;
+    translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
     abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
 
     let upstreamResponse;
@@ -1150,7 +1188,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       }
       const payload = translateOllamaResponse(
         upstreamPayload,
-        body,
+        translated.requestBody,
         activeModelInfo.model,
         responseId,
         createdAt,
@@ -1180,7 +1218,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
     writer = new SseWriter(response);
     const builder = new StreamingResponseBuilder(
       writer,
-      body,
+      translated.requestBody,
       activeModelInfo.model,
       responseId,
       createdAt,
@@ -1246,7 +1284,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
         : new ResponsesApiError(500, 'INTERNAL_ERROR', error.message || 'Unexpected Responses adapter error.', null, 'server_error'));
     if (!response.headersSent && !response.destroyed) sendJson(response, apiError.statusCode, responsesErrorPayload(apiError));
     return {
-      ...outcomeBase(started, pathname, body, activeModelInfo?.model ?? null, translated),
+      ...outcomeBase(started, pathname, body, activeModelInfo?.model ?? null, translated, toolPolicy),
       allowed: false,
       rejected: true,
       status: apiError.statusCode,

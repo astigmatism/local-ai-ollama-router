@@ -56,6 +56,7 @@ Policy-enforced. Default behavior:
 - accepts `think` as `true`, `false`, or a supported reasoning effort string
 - maps string values through the active marker's validated `reasoning_effort_map`; when omitted, composes the active marker's `default_think` over the optional global `DEFAULT_THINK`
 - drops enabled `think` when `/api/show` reports that the model lacks the `thinking` capability
+- applies `UNSUPPORTED_TOOLS_POLICY` against the rewritten active model when tool controls or prior tool history are present
 - streams response when `stream` is omitted or true
 - captures final usage fields when available
 
@@ -83,6 +84,10 @@ To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must i
 
 All Ollama upstream calls use Node's native HTTP transport. The configured `OLLAMA_UPSTREAM_TIMEOUT_MS` covers queue and model-load waits through receipt of the upstream response headers. JSON request bodies are sent with an explicit byte `Content-Length`, not chunked transfer framing.
 
+## OpenAI chat completions compatibility
+
+`POST /v1/chat/completions` is policy-enforced and proxied to Ollama's matching OpenAI-compatible endpoint. Model rewriting uses the same active-model rules as `/api/chat`. Messages, streaming, sampling parameters, and other OpenAI fields remain unchanged; the router does not inject Ollama `keep_alive` into this protocol. Native tool fields are normalized according to `UNSUPPORTED_TOOLS_POLICY` before forwarding.
+
 ## OpenAI Responses compatibility
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
@@ -99,6 +104,7 @@ All Ollama upstream calls use Node's native HTTP transport. The configured `OLLA
 - Ollama always receives the active model, the configured `FORCE_KEEP_ALIVE` value, and `shift: false` by default. `RESPONSES_CONTEXT_SHIFT=true` is an explicit opt-in to the old shifting behavior.
 - Responses requests never invoke model pull, create, copy, push, delete, fallback, or switching logic.
 - `MODEL_POLICY_MODE`, `ALLOWED_MODELS`, and `USE_ACTIVE_MODEL_WHEN_MISSING` do not alter these Responses rules.
+- Native tool support is checked against this resolved active model, never the client identifier.
 
 ### Supported request fields
 
@@ -110,7 +116,7 @@ All Ollama upstream calls use Node's native HTTP transport. The configured `OLLA
 | `stream` | `false` by default; `true` produces Responses SSE events. |
 | `tools` | Function tools and function-only Codex namespace groups are translated to Ollama function definitions. |
 | `tool_choice` | `auto` and `none` only. Other forms receive HTTP 400. |
-| `parallel_tool_calls` | Boolean accepted and reflected in the response. Call IDs remain individually correlated. |
+| `parallel_tool_calls` | Boolean accepted, forwarded, and reflected in the response. Call IDs remain individually correlated. |
 | `reasoning.effort` | Accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `none` becomes boolean `false`; other values are mapped by the active model/profile's `reasoning_effort_map`. |
 | `reasoning_effort` | Top-level compatibility alias for `reasoning.effort`; conflicting simultaneous values receive HTTP 400. |
 | `text.format` | Plain text, `json_object`, and `json_schema` formats. |
@@ -149,7 +155,7 @@ Ollama's `thinking` capability is binary metadata; it does not enumerate valid s
 
 Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; each target must be boolean `true` or a string present in `supported_think_levels`. Boolean `true` selects the model/runtime's enabled default reasoning mode. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Native boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
 
-Request records log `requestedModel`, `activeModel`, `forwardedModel`, and `modelRewritten`, plus `incomingReasoningEffort` separately from `forwardedThink`, incoming `think`, the effective effort, and mapping/drop state. Thus both a stable Codex identifier rewritten to the marker and a Codex `max` effort mapped to nighttime boolean `true` remain distinguishable in telemetry. Prompt content remains governed by `PROMPT_LOGGING`; the default records metadata only.
+Request records log `requestedModel`, `activeModel`, `forwardedModel`, and `modelRewritten`, plus `incomingReasoningEffort` separately from `forwardedThink`, incoming `think`, the effective effort, and mapping/drop state. Tool metadata is limited to `toolsPresent`, `toolCount`, `toolChoicePresent`, `toolsSupported`, `toolsDropped`, `unsupportedToolsPolicy`, and the boolean `toolHistoryPresent`. The `unsupported_tools_dropped` event uses the same metadata and never contains tool schemas, arguments, prompts, or message content. Thus both a stable client identifier rewritten to the marker and a policy-driven capability decision remain distinguishable without logging private payloads. Prompt content remains governed by `PROMPT_LOGGING`; the default records metadata only.
 
 Supported input items are:
 
@@ -168,7 +174,7 @@ Ollama's aggregate `prompt_eval_count` and `eval_count` map exactly to Responses
 
 A completion must contain non-whitespace assistant text or at least one function call. Thinking-only, whitespace-only, and otherwise blank results receive `EMPTY_UPSTREAM_RESPONSE` instead of a fabricated empty message. For an already-started SSE response this is the final `response.failed` event, with no `response.completed` event; tool-only results remain valid.
 
-Top-level `type: "function"` tools and Codex `type: "namespace"` groups containing only functions are accepted. Namespace members are given collision-safe qualified names for Ollama, then restored to separate `namespace` and `name` fields in Responses function-call items so Codex can dispatch them locally. Built-in provider tools such as `web_search`, `file_search`, `computer_use`, and `image_generation` receive HTTP 400 even when `tool_choice` is `none`; this prevents silent loss of capabilities assumed by the client. Configure Codex with `web_search = "disabled"`.
+Top-level `type: "function"` tools and Codex `type: "namespace"` groups containing only functions are accepted. Namespace members are given collision-safe qualified names for Ollama, then restored to separate `namespace` and `name` fields in Responses function-call items so Codex can dispatch them locally. When tools are supported or passed through, built-in provider tools such as `web_search`, `file_search`, `computer_use`, and `image_generation` receive HTTP 400 even when `tool_choice` is `none`; this prevents silent loss of capabilities assumed by the client. In `drop` mode with an unsupported active model, all tool controls are removed before this adapter validation so ordinary chat can continue.
 
 ### Non-streaming example
 
@@ -227,7 +233,7 @@ Errors returned before streaming begins use the OpenAI-compatible envelope. For 
 }
 ```
 
-Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `EMPTY_UPSTREAM_RESPONSE`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
+Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOLS`, `UNSUPPORTED_TOOL_HISTORY`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `EMPTY_UPSTREAM_RESPONSE`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
 
 ## Router errors
 
@@ -255,6 +261,8 @@ Common codes:
 | `INVALID_THINK_VALUE` | Native `think` is not a boolean or recognized reasoning effort. |
 | `MISSING_REASONING_CAPABILITIES` | A string effort was requested without an active-profile map. |
 | `INVALID_REASONING_CAPABILITIES` | Active-profile reasoning metadata is incomplete or inconsistent. |
+| `UNSUPPORTED_TOOLS` | Reject policy blocked native tool controls for an active model without tool support. |
+| `UNSUPPORTED_TOOL_HISTORY` | The active model lacks tool support and the conversation contains prior tool calls/results that cannot be safely dropped. |
 | `UPSTREAM_REQUEST_FAILED` | Raw Ollama request failed before response. |
 | `API_NOT_ON_ADMIN_PORT` | `/api/*` was requested from the admin portal listener instead of the router API listener. |
 

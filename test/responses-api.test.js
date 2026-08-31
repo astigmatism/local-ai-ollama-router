@@ -83,6 +83,10 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       return;
     }
     state.residentModels.add(body.model);
+    if (Object.hasOwn(body || {}, 'tools') && !capabilities.includes('tools')) {
+      sendJson(response, 400, { error: `${body.model} does not support tools` });
+      return;
+    }
     if (
       enforceThinkValues
       && Object.hasOwn(body || {}, 'think')
@@ -775,6 +779,11 @@ test('POST /v1/responses defaults to the active model and leaves existing model 
     assert.equal(upstreamChat.body.keep_alive, -1);
     assert.equal(upstreamChat.body.shift, false);
     assert.equal(upstreamChat.body.think, false);
+    assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/show'), false);
+    const record = fixture.context.store.recentRequests(1)[0];
+    assert.equal(record.toolsPresent, false);
+    assert.equal(record.toolsSupported, null);
+    assert.equal(record.toolsDropped, false);
 
     const tags = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/tags`);
     assert.equal(tags.status, 200);
@@ -1202,8 +1211,128 @@ test('missing active marker fails closed and maintenance mode rejects Responses 
   }
 });
 
+test('Responses drop policy removes unsupported tools before validation for streaming and non-streaming chat', async () => {
+  const fixture = await makeFixture({
+    env: {
+      REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true',
+      UNSUPPORTED_TOOLS_POLICY: 'drop'
+    }
+  });
+  try {
+    const nonStreaming = await postResponses(fixture, {
+      model: 'stable-responses-name',
+      input: 'hello',
+      stream: false,
+      tools: [{ type: 'web_search' }],
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+      max_tool_calls: 2
+    }, '/responses');
+    assert.equal(nonStreaming.status, 200);
+    const nonStreamingPayload = await nonStreaming.json();
+    assert.deepEqual(nonStreamingPayload.tools, []);
+    assert.equal(nonStreamingPayload.tool_choice, 'auto');
+
+    const streaming = await postResponses(fixture, {
+      model: 'stable-responses-name',
+      input: 'hello',
+      stream: true,
+      tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+      tool_choice: 'auto',
+      parallel_tool_calls: true
+    });
+    assert.equal(streaming.status, 200);
+    assert.equal(parseSse(await streaming.text()).at(-1).type, 'response.completed');
+    await fixture.waitForIdle();
+
+    const chats = fixture.upstream.requests.filter((item) => item.pathname === '/api/chat');
+    assert.equal(chats.length, 2);
+    for (const chat of chats) {
+      for (const field of ['tools', 'tool_choice', 'parallel_tool_calls', 'max_tool_calls']) {
+        assert.equal(Object.hasOwn(chat.body, field), false);
+      }
+    }
+    assert.deepEqual(
+      fixture.upstream.requests.filter((item) => item.pathname === '/api/show').map((item) => item.body),
+      [{ model: 'active:model' }, { model: 'active:model' }]
+    );
+
+    const records = fixture.context.store.recentRequests(2);
+    assert.deepEqual(records.map((record) => record.toolsDropped), [true, true]);
+    assert.deepEqual(records.map((record) => record.toolsSupported), [false, false]);
+    assert.deepEqual(records.map((record) => record.unsupportedToolsPolicy), ['drop', 'drop']);
+    const events = fixture.context.store.recentEvents(20).filter((event) => event.type === 'unsupported_tools_dropped');
+    assert.equal(events.length, 2);
+    assert.equal(events.every((event) => !Object.hasOwn(event, 'tools')), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Responses preserves supported tool controls and rejects unsupported prior tool history safely', async () => {
+  const supported = await makeFixture({
+    env: { UNSUPPORTED_TOOLS_POLICY: 'drop' },
+    capabilities: ['completion', 'tools']
+  });
+  const tools = [{ type: 'function', name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }];
+  try {
+    const response = await postResponses(supported, {
+      input: 'hello',
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+      max_tool_calls: 4
+    });
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.deepEqual(payload.tools, tools);
+    assert.equal(payload.tool_choice, 'auto');
+    assert.equal(payload.parallel_tool_calls, false);
+
+    const chat = supported.upstream.requests.find((item) => item.pathname === '/api/chat');
+    assert.deepEqual(chat.body.tools, [{
+      type: 'function',
+      function: {
+        name: 'lookup',
+        description: 'Lookup',
+        parameters: { type: 'object' }
+      }
+    }]);
+    assert.equal(chat.body.tool_choice, 'auto');
+    assert.equal(chat.body.parallel_tool_calls, false);
+    assert.equal(chat.body.max_tool_calls, 4);
+    const record = supported.context.store.recentRequests(1)[0];
+    assert.equal(record.toolsSupported, true);
+    assert.equal(record.toolsDropped, false);
+  } finally {
+    await supported.cleanup();
+  }
+
+  const unsupported = await makeFixture({ env: { UNSUPPORTED_TOOLS_POLICY: 'drop' } });
+  try {
+    const response = await postResponses(unsupported, {
+      input: [
+        { role: 'user', content: 'lookup' },
+        { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_1', output: 'result' }
+      ]
+    });
+    assert.equal(response.status, 400);
+    const payload = await response.json();
+    assert.equal(payload.error.code, 'UNSUPPORTED_TOOL_HISTORY');
+    assert.equal(payload.error.param, 'input');
+    assert.equal(unsupported.upstream.requests.some((item) => item.pathname === '/api/chat'), false);
+    assert.deepEqual(
+      unsupported.upstream.requests.filter((item) => item.pathname === '/api/show').map((item) => item.body),
+      [{ model: 'active:model' }]
+    );
+  } finally {
+    await unsupported.cleanup();
+  }
+});
+
 test('function tool request and tool output follow-up preserve definitions and call_id', async () => {
-  const fixture = await makeFixture();
+  const fixture = await makeFixture({ capabilities: ['completion', 'tools'] });
   const tool = { type: 'function', name: 'get_weather', description: 'Get weather', parameters: { type: 'object' } };
   try {
     const first = await postResponses(fixture, { input: 'tool', tools: [tool], tool_choice: 'auto' });
@@ -1238,7 +1367,7 @@ test('function tool request and tool output follow-up preserve definitions and c
 });
 
 test('reasoning plus a tool call is returned and preserved with the tool result on the next request', async () => {
-  const fixture = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  const fixture = await makeFixture({ capabilities: ['completion', 'thinking', 'tools'] });
   const tool = { type: 'function', name: 'get_weather', parameters: { type: 'object' } };
   try {
     const first = await postResponses(fixture, {
@@ -1324,7 +1453,7 @@ test('streaming text emits a coherent monotonic SSE lifecycle and completed usag
 });
 
 test('streaming function calls emit argument delta/done and matching output item IDs', async () => {
-  const fixture = await makeFixture();
+  const fixture = await makeFixture({ capabilities: ['completion', 'tools'] });
   try {
     const response = await postResponses(fixture, {
       input: 'stream-tool',
@@ -1348,7 +1477,7 @@ test('streaming function calls emit argument delta/done and matching output item
 });
 
 test('streaming thinking emits a complete reasoning item before the following tool call', async () => {
-  const fixture = await makeFixture({ capabilities: ['completion', 'thinking'] });
+  const fixture = await makeFixture({ capabilities: ['completion', 'thinking', 'tools'] });
   try {
     const response = await postResponses(fixture, {
       input: 'stream-thinking-tool',

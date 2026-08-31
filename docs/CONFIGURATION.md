@@ -87,6 +87,7 @@ For manual marker updates, `scripts/write-active-model.sh` accepts a capability 
 | `ALLOWED_MODELS` | empty | CSV of additional models for `allowlist` mode or exceptions. |
 | `REWRITE_REQUESTED_MODEL_TO_ACTIVE` | `false` | When true, client model names are advisory and model-bearing requests—including `/v1/responses` and `/responses`—forward only the active marker model. Responses also accepts an omitted model. When false, Responses rejects mismatches but still accepts an exact or omitted model. |
 | `FORCE_KEEP_ALIVE` | `-1` | Forwarded keep-alive for active protected requests. |
+| `UNSUPPORTED_TOOLS_POLICY` | `passthrough` | `passthrough`, `drop`, or `reject`. When the rewritten active model lacks `tools`, drop mode removes native tool controls and reject mode returns a router error. Unsupported prior tool-use history is always rejected explicitly. |
 | `PROTECTED_MODEL_ENDPOINTS` | `/api/chat,/api/generate,/api/embed,/api/embeddings` | Endpoints receiving keep-alive rewrite. |
 | `USE_ACTIVE_MODEL_WHEN_MISSING` | `false` | When true, a missing model is filled for native model-body routes. Responses always resolves an omitted model from the active marker and does not consult this setting. |
 | `ALLOW_MODEL_MANAGEMENT` | `false` | Enables pull/create/copy/push/delete only with legacy admin auth when `ADMIN_TOKEN` is set. |

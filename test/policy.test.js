@@ -104,6 +104,29 @@ test('rewrite requested model to active also fills missing model', () => {
   assert.equal(result.sanitizedBody.keep_alive, -1);
 });
 
+test('OpenAI chat completions rewrites only the model and preserves protocol fields', () => {
+  const body = {
+    model: 'stable-client-name',
+    messages: [{ role: 'user', content: 'hello' }],
+    stream: true,
+    temperature: 0.3,
+    tools: [{ type: 'function', function: { name: 'lookup' } }]
+  };
+  const result = evaluateProxyPolicy({
+    method: 'POST',
+    pathname: '/v1/chat/completions',
+    body,
+    activeModelInfo: { model: 'active:model' },
+    config: config({ REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true' })
+  });
+
+  assert.equal(result.allowed, true);
+  assert.equal(result.requestedModel, 'stable-client-name');
+  assert.equal(result.forwardedModel, 'active:model');
+  assert.deepEqual(result.sanitizedBody, { ...body, model: 'active:model' });
+  assert.equal(Object.hasOwn(result.sanitizedBody, 'keep_alive'), false);
+});
+
 test('rewrite requested model to active covers model show requests', () => {
   const result = evaluateProxyPolicy({
     method: 'POST',

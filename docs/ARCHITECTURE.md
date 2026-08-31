@@ -42,6 +42,8 @@ This is enforced at the router so individual clients do not need to remember or 
 
 `src/active-model.js` reads `/app/runtime/active-model.json` or falls back to `ACTIVE_MODEL`. The deployment/profile system should write the marker.
 
+`src/native-tools.js` inspects only native tool-control metadata and prior tool-history markers. The generic proxy and Responses adapter invoke it after resolving/replacing the client model name. A lazy per-request `/api/show` lookup is shared with thinking normalization, so requests containing both enabled thinking and tools issue one capability query and requests containing neither issue none. Unsupported history is rejected rather than rewritten; drop events contain counts and booleans, never schemas, arguments, prompts, or message content.
+
 The marker is also the source of truth for model-specific reasoning capabilities. `src/reasoning.js` validates `supported_think_levels` and `reasoning_effort_map`, whose targets may be declared string levels or boolean `true` for the model/runtime default; `src/upstream.js` applies that map before the shared `/api/show` thinking-capability check. This path is used by Responses, native chat, and native generate requests.
 
 ### Proxy and streaming support
@@ -70,6 +72,9 @@ GET  /api/ps
 GET  /api/version
 POST /api/embed
 POST /api/embeddings
+POST /v1/chat/completions
+POST /v1/responses
+POST /responses
 ```
 
 Disabled/admin-gated model-management routes:

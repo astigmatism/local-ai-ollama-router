@@ -65,3 +65,16 @@ test('disables Responses context shifting by default with an explicit opt-in', (
   assert.equal(enabled.responsesContextShift, true);
   assert.equal(publicConfig(enabled).responsesContextShift, true);
 });
+
+test('validates unsupported-tools policy and defaults to backward-compatible passthrough', () => {
+  const defaultConfig = loadConfig({});
+  assert.equal(defaultConfig.unsupportedToolsPolicy, 'passthrough');
+  assert.equal(publicConfig(defaultConfig).unsupportedToolsPolicy, 'passthrough');
+
+  assert.equal(loadConfig({ UNSUPPORTED_TOOLS_POLICY: 'drop' }).unsupportedToolsPolicy, 'drop');
+  assert.equal(loadConfig({ UNSUPPORTED_TOOLS_POLICY: 'REJECT' }).unsupportedToolsPolicy, 'reject');
+  assert.throws(
+    () => loadConfig({ UNSUPPORTED_TOOLS_POLICY: 'remove' }),
+    /UNSUPPORTED_TOOLS_POLICY must be one of: passthrough, drop, reject.*remove/
+  );
+});
