@@ -478,7 +478,7 @@ export function translateResponsesRequest(
     model: activeModel,
     messages: translateInput(body.input, body.instructions, translatedTools.toolNames),
     stream: body.stream === true,
-    shift: contextShift,
+    ...(contextShift ? { shift: true } : {}),
     keep_alive: forcedKeepAlive,
     ...(translatedTools.tools.length ? { tools: translatedTools.tools } : {}),
     ...(Object.hasOwn(body, 'tool_choice') ? { tool_choice: body.tool_choice } : {}),
@@ -923,6 +923,13 @@ class StreamingResponseBuilder {
   }
 }
 
+async function endFailedStream(builder, writer, apiError) {
+  const failed = builder.shell('failed');
+  failed.error = { code: apiError.code, message: apiError.message };
+  await writer.event('response.failed', { response: failed });
+  writer.end();
+}
+
 async function readUpstreamError(upstreamResponse) {
   const text = await upstreamResponse.text();
   if (!text.trim()) return `Ollama returned HTTP ${upstreamResponse.status}.`;
@@ -1060,6 +1067,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
   let toolPolicy = emptyToolPolicy(null, context.config.unsupportedToolsPolicy);
   let abortState = null;
   let writer = null;
+  let builder = null;
 
   try {
     if (request.method !== 'POST') {
@@ -1144,6 +1152,30 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
     abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
 
+    const responseId = newId('resp');
+    const createdAt = Math.floor(Date.now() / 1000);
+    if (translated.stream) {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-store',
+        connection: 'keep-alive',
+        'x-ollama-router': 'local-ai-ollama-router',
+        'x-accel-buffering': 'no'
+      });
+      writer = new SseWriter(response);
+      builder = new StreamingResponseBuilder(
+        writer,
+        translated.requestBody,
+        activeModelInfo.model,
+        responseId,
+        createdAt,
+        translated.toolNames
+      );
+      // Start the downstream SSE lifecycle before Ollama has a worker. This
+      // keeps a queued generation from tripping the client's header timeout.
+      await builder.start();
+    }
+
     let upstreamResponse;
     try {
       upstreamResponse = await upstreamFetch(context.config, '/api/chat', {
@@ -1169,19 +1201,48 @@ export async function handleResponsesRequest(request, response, pathname, contex
           responseBytes: writer?.bytes || 0
         };
       }
-      if (abortState.timedOut() || error?.name === 'TimeoutError') {
-        throw new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error');
+      const apiError = abortState.timedOut() || error?.name === 'TimeoutError'
+        ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
+        : new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', error.message || 'Could not reach Ollama.', null, 'server_error');
+      if (builder && writer && !response.destroyed) {
+        await endFailedStream(builder, writer, apiError);
+        return {
+          ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
+          allowed: true,
+          rejected: false,
+          status: 200,
+          responseStatus: 200,
+          upstreamError: true,
+          errorCode: apiError.code,
+          errorSummary: apiError.message,
+          usage: null,
+          responseBytes: writer.bytes
+        };
       }
-      throw new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', error.message || 'Could not reach Ollama.', null, 'server_error');
+      throw apiError;
     }
 
     if (!upstreamResponse.ok) {
       const upstreamMessage = await readUpstreamError(upstreamResponse);
-      throw new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', upstreamMessage, null, 'server_error');
+      const apiError = new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', upstreamMessage, null, 'server_error');
+      if (builder && writer && !response.destroyed) {
+        await endFailedStream(builder, writer, apiError);
+        return {
+          ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
+          allowed: true,
+          rejected: false,
+          status: 200,
+          responseStatus: 200,
+          upstreamError: true,
+          errorCode: apiError.code,
+          errorSummary: apiError.message,
+          usage: null,
+          responseBytes: writer.bytes
+        };
+      }
+      throw apiError;
     }
 
-    const responseId = newId('resp');
-    const createdAt = Math.floor(Date.now() / 1000);
     if (!translated.stream) {
       let upstreamPayload;
       try {
@@ -1211,23 +1272,6 @@ export async function handleResponsesRequest(request, response, pathname, contex
       };
     }
 
-    response.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-store',
-      connection: 'keep-alive',
-      'x-ollama-router': 'local-ai-ollama-router',
-      'x-accel-buffering': 'no'
-    });
-    writer = new SseWriter(response);
-    const builder = new StreamingResponseBuilder(
-      writer,
-      translated.requestBody,
-      activeModelInfo.model,
-      responseId,
-      createdAt,
-      translated.toolNames
-    );
-    await builder.start();
     try {
       await processNdjsonStream(upstreamResponse, builder);
       const completed = await builder.complete();
@@ -1262,10 +1306,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
         : (abortState.timedOut()
           ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
           : new ResponsesApiError(502, 'UPSTREAM_STREAM_FAILED', error.message, null, 'server_error'));
-      const failed = builder.shell('failed');
-      failed.error = { code: apiError.code, message: apiError.message };
-      await writer.event('response.failed', { response: failed });
-      writer.end();
+      await endFailedStream(builder, writer, apiError);
       return {
         ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
         allowed: true,

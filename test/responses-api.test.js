@@ -58,7 +58,13 @@ function lastUserText(body) {
 
 function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = false, activeModel = 'active:model' } = {}) {
   const requests = [];
-  const state = { upstreamClosed: false, residentModels: new Set([activeModel]) };
+  let releaseDelayedHeaders;
+  const delayedHeaders = new Promise((resolve) => { releaseDelayedHeaders = resolve; });
+  const state = {
+    upstreamClosed: false,
+    residentModels: new Set([activeModel]),
+    releaseDelayedHeaders
+  };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://fake-ollama.local');
     const body = ['GET', 'HEAD'].includes(String(request.method).toUpperCase()) ? null : await readJsonBody(request);
@@ -100,6 +106,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
     }
 
     const prompt = lastUserText(body);
+    if (prompt === 'delayed-headers') await delayedHeaders;
     if (!body.stream) {
       if (prompt === 'thinking-tool') {
         sendJson(response, 200, {
@@ -355,7 +362,7 @@ test('request translation preserves instructions, message roles, images, JSON fo
 
   assert.equal(translated.upstreamBody.model, 'active:model');
   assert.equal(translated.upstreamBody.keep_alive, -1);
-  assert.equal(translated.upstreamBody.shift, false);
+  assert.equal(Object.hasOwn(translated.upstreamBody, 'shift'), false);
   assert.deepEqual(translated.upstreamBody.options, { temperature: 0.25, num_predict: 123 });
   assert.deepEqual(translated.upstreamBody.format, { type: 'object' });
   assert.equal(translated.upstreamBody.think, 'minimal');
@@ -364,6 +371,15 @@ test('request translation preserves instructions, message roles, images, JSON fo
     { role: 'user', content: 'describe', images: ['aGVsbG8='] },
     { role: 'assistant', content: 'prior answer' }
   ]);
+
+  const withContextShift = translateResponsesRequest(
+    { input: 'shift enabled', stream: true },
+    'active:model',
+    -1,
+    false,
+    true
+  );
+  assert.equal(withContextShift.upstreamBody.shift, true);
 });
 
 test('request translation merges multiple system and developer messages in their relative order', () => {
@@ -777,7 +793,7 @@ test('POST /v1/responses defaults to the active model and public discovery expos
     const upstreamChat = fixture.upstream.requests.find((item) => item.pathname === '/api/chat');
     assert.equal(upstreamChat.body.model, 'active:model');
     assert.equal(upstreamChat.body.keep_alive, -1);
-    assert.equal(upstreamChat.body.shift, false);
+    assert.equal(Object.hasOwn(upstreamChat.body, 'shift'), false);
     assert.equal(upstreamChat.body.think, false);
     assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/show'), false);
     const record = fixture.context.store.recentRequests(1)[0];
@@ -1080,7 +1096,7 @@ test('Responses rewrite mode treats requested models as advisory and preserves a
     assert.equal(chats.length, cases.length);
     assert.deepEqual(chats.map((item) => item.body.model), cases.map(() => activeModel));
     assert.deepEqual(chats.map((item) => item.body.keep_alive), cases.map(() => -1));
-    assert.deepEqual(chats.map((item) => item.body.shift), cases.map(() => false));
+    assert.equal(chats.every((item) => !Object.hasOwn(item.body, 'shift')), true);
     assert.equal(chats[2].body.think, true);
 
     const psResponse = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/ps`);
@@ -1480,6 +1496,28 @@ test('streaming text emits a coherent monotonic SSE lifecycle and completed usag
     assert.equal(events.at(-1).response.output[0].content[0].text, 'hello stream');
     assert.equal(events.at(-1).response.usage.total_tokens, 11);
   } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('streaming response headers and lifecycle begin before Ollama response headers arrive', async () => {
+  const fixture = await makeFixture();
+  try {
+    const pendingResponse = postResponses(fixture, { input: 'delayed-headers', stream: true });
+    const earlyResult = await Promise.race([
+      pendingResponse.then((response) => ({ response })),
+      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 100))
+    ]);
+    fixture.upstream.state.releaseDelayedHeaders();
+
+    assert.equal(earlyResult.timedOut, undefined, 'router waited for Ollama before starting SSE');
+    assert.equal(earlyResult.response.status, 200);
+    assert.match(earlyResult.response.headers.get('content-type') || '', /text\/event-stream/);
+    const events = parseSse(await earlyResult.response.text());
+    assert.equal(events[0].type, 'response.created');
+    assert.equal(events.at(-1).type, 'response.completed');
+  } finally {
+    fixture.upstream.state.releaseDelayedHeaders();
     await fixture.cleanup();
   }
 });
