@@ -532,14 +532,14 @@ test('native generation rejects incomplete profiles and invalid think strings be
   }
 });
 
-test('native boolean and none think values remain usable without string-level metadata', async () => {
+test('native think values gracefully use binary model capabilities without string-level metadata', async () => {
   const fixture = await makeFixture(
     {},
     { capabilities: ['completion', 'thinking'], enforceThinkValues: true },
     { supported_think_levels: undefined, reasoning_effort_map: undefined }
   );
   try {
-    for (const think of [true, false, 'none']) {
+    for (const think of [true, false, 'none', 'low', 'max']) {
       const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -553,7 +553,36 @@ test('native boolean and none think values remain usable without string-level me
       assert.equal(response.status, 200);
     }
     const chats = fixture.upstream.requests.filter((request) => request.pathname === '/api/chat');
-    assert.deepEqual(chats.map((request) => request.body.think), [true, false, false]);
+    assert.deepEqual(chats.map((request) => request.body.think), [true, false, false, true, true]);
+    const records = fixture.context.store.recentRequests(5).reverse();
+    assert.deepEqual(records.map((record) => record.incomingThink), [true, false, 'none', 'low', 'max']);
+    assert.deepEqual(records.map((record) => record.thinkMapped), [false, false, true, true, true]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('native string reasoning is dropped for a non-thinking model without profile metadata', async () => {
+  const fixture = await makeFixture(
+    {},
+    { capabilities: ['completion'] },
+    { supported_think_levels: undefined, reasoning_effort_map: undefined }
+  );
+  try {
+    const response = await fetch(`http://127.0.0.1:${fixture.apiPort}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'active:model', prompt: 'hello', stream: false, think: 'max' })
+    });
+    assert.equal(response.status, 200);
+
+    const generated = fixture.upstream.requests.find((request) => request.pathname === '/api/generate');
+    assert.equal(Object.hasOwn(generated.body, 'think'), false);
+    const record = fixture.context.store.recentRequests(1)[0];
+    assert.equal(record.incomingThink, 'max');
+    assert.equal(record.thinkMapped, true);
+    assert.equal(record.thinkDropped, true);
+    assert.equal(record.thinkingSupported, false);
   } finally {
     await fixture.cleanup();
   }

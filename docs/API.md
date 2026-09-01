@@ -154,7 +154,7 @@ Ollama's `thinking` capability is binary metadata; it does not enumerate valid s
 }
 ```
 
-Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; each target must be boolean `true` or a string present in `supported_think_levels`. Boolean `true` selects the model/runtime's enabled default reasoning mode. A string request without metadata receives HTTP 503 `MISSING_REASONING_CAPABILITIES`. An incomplete or inconsistent profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES`. These checks happen before `/api/show` or generation, so the router never forwards an undeclared string level. Native boolean `true`/`false` remains supported without a string-level map, subject to the binary `/api/show` check for enabled thinking.
+Both fields are required when either is present. The map must cover `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; each target must be boolean `true` or a string present in `supported_think_levels`. Boolean `true` selects the model/runtime's enabled default reasoning mode. Without profile metadata, an enabled string effort degrades to boolean `true`; the router forwards it when `/api/show` advertises `thinking` and removes it when thinking is unsupported or cannot be established. An incomplete or inconsistent explicit profile receives HTTP 503 `INVALID_REASONING_CAPABILITIES` before `/api/show` or generation. Native boolean `true`/`false` remains supported without a string-level map, subject to the same binary `/api/show` check for enabled thinking.
 
 Request records log `requestedModel`, `activeModel`, `forwardedModel`, and `modelRewritten`, plus `incomingReasoningEffort` separately from `forwardedThink`, incoming `think`, the effective effort, and mapping/drop state. Tool metadata is limited to `toolsPresent`, `toolCount`, `toolChoicePresent`, `toolsSupported`, `toolsDropped`, `unsupportedToolsPolicy`, and the boolean `toolHistoryPresent`. The `unsupported_tools_dropped` event uses the same metadata and never contains tool schemas, arguments, prompts, or message content. Thus both a stable client identifier rewritten to the marker and a policy-driven capability decision remain distinguishable without logging private payloads. Prompt content remains governed by `PROMPT_LOGGING`; the default records metadata only.
 
@@ -234,7 +234,7 @@ Errors returned before streaming begins use the OpenAI-compatible envelope. For 
 }
 ```
 
-Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOLS`, `UNSUPPORTED_TOOL_HISTORY`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `MISSING_REASONING_CAPABILITIES`, `INVALID_REASONING_CAPABILITIES`, `EMPTY_UPSTREAM_RESPONSE`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
+Common adapter-only codes include `STATEFUL_REQUEST_UNSUPPORTED`, `UNSUPPORTED_TOOLS`, `UNSUPPORTED_TOOL_HISTORY`, `UNSUPPORTED_TOOL_CHOICE`, `UNSUPPORTED_TOOL_TYPE`, `UNKNOWN_TOOL_CALL_ID`, `MALFORMED_TOOL_ARGUMENTS`, `INVALID_REASONING_CAPABILITIES`, `EMPTY_UPSTREAM_RESPONSE`, `UPSTREAM_TIMEOUT`, and `INCOMPLETE_UPSTREAM_STREAM`.
 
 ## Router errors
 
@@ -260,7 +260,6 @@ Common codes:
 | `ADMIN_REQUIRED` | Legacy admin auth required for a gated model-management endpoint. |
 | `MAINTENANCE_MODE` | Router maintenance mode rejects generation. |
 | `INVALID_THINK_VALUE` | Native `think` is not a boolean or recognized reasoning effort. |
-| `MISSING_REASONING_CAPABILITIES` | A string effort was requested without an active-profile map. |
 | `INVALID_REASONING_CAPABILITIES` | Active-profile reasoning metadata is incomplete or inconsistent. |
 | `UNSUPPORTED_TOOLS` | Reject policy blocked native tool controls for an active model without tool support. |
 | `UNSUPPORTED_TOOL_HISTORY` | The active model lacks tool support and the conversation contains prior tool calls/results that cannot be safely dropped. |

@@ -24,7 +24,7 @@ The test suite validates:
 - Responses request/message/tool translation
 - day/night profile-specific reasoning negotiation across native chat/generate and Responses, including nighttime `high`/`xhigh`/`max` → boolean `true`, low/medium, defaults, streaming, and non-streaming
 - a strict Ollama 0.32.13-style fake that rejects string `"xhigh"`, while successful Responses return visible reasoning and answer output
-- rejection of missing, malformed, incomplete, or inconsistent reasoning capability profiles before Ollama generation
+- binary reasoning fallback when profile metadata is missing, plus rejection of malformed, incomplete, or inconsistent explicit profiles before Ollama generation
 - Responses rewrite-mode forwarding for legacy nighttime, exact active, stable Codex, arbitrary, and omitted identifiers
 - streaming and non-streaming forwarding only to the active model, with unchanged Ollama residency and no model-management operation
 - strict-mode mismatch rejection independent of permissive or allowlist policy modes

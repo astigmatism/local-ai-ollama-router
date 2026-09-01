@@ -841,6 +841,38 @@ test('Responses reasoning drops enabled think for unsupported models and preserv
   }
 });
 
+test('Responses reasoning gracefully falls back to binary capabilities without profile metadata', async () => {
+  for (const item of [
+    { capabilities: ['completion', 'thinking'], expectedThink: true, thinkingSupported: true },
+    { capabilities: ['completion'], expectedThink: undefined, thinkingSupported: false }
+  ]) {
+    const fixture = await makeFixture({
+      marker: { supported_think_levels: undefined, reasoning_effort_map: undefined },
+      capabilities: item.capabilities,
+      enforceThinkValues: true
+    });
+    try {
+      const response = await postResponses(fixture, {
+        input: 'binary fallback',
+        reasoning: { effort: 'max' }
+      });
+      assert.equal(response.status, 200);
+
+      const chat = fixture.upstream.requests.find((request) => request.pathname === '/api/chat');
+      assert.equal(chat.body.think, item.expectedThink);
+      assert.equal(Object.hasOwn(chat.body, 'think'), item.expectedThink !== undefined);
+      const record = fixture.context.store.recentRequests(1)[0];
+      assert.equal(record.incomingThink, 'max');
+      assert.equal(record.forwardedThink, item.expectedThink);
+      assert.equal(record.thinkMapped, true);
+      assert.equal(record.thinkDropped, item.expectedThink === undefined);
+      assert.equal(record.thinkingSupported, item.thinkingSupported);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
 test('Responses applies active-model thinking defaults with per-request precedence', async () => {
   const fixture = await makeFixture({
     env: { DEFAULT_THINK: 'high' },
@@ -959,13 +991,8 @@ test('Responses nighttime max and xhigh pass strict Ollama think validation with
   }
 });
 
-test('Responses rejects missing, incomplete, and inconsistent capability profiles before Ollama', async () => {
+test('Responses rejects incomplete and inconsistent capability profiles before Ollama', async () => {
   const cases = [
-    {
-      marker: { supported_think_levels: undefined, reasoning_effort_map: undefined },
-      request: { input: 'missing', reasoning: { effort: 'max' } },
-      code: 'MISSING_REASONING_CAPABILITIES'
-    },
     {
       marker: { reasoning_effort_map: undefined },
       request: { input: 'incomplete' },

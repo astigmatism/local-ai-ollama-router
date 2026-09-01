@@ -152,7 +152,15 @@ export function createModelCapabilityLookup(config, model) {
 export async function normalizeThinkForModel(config, model, body, reasoningProfile = null, capabilityLookup = null) {
   const incomingThink = body?.think;
   const validatedCapabilities = validateReasoningCapabilities(reasoningProfile);
-  const mappedThink = normalizeThinkValue(incomingThink, validatedCapabilities);
+  // Ollama exposes binary thinking support through /api/show even when the
+  // deployment has no safe string-level map. In that case, translate any
+  // enabled effort to boolean true and let the binary capability check below
+  // either forward it or remove it. Explicit malformed profiles still fail so
+  // operator configuration errors are not silently ignored.
+  const mappedThink = normalizeThinkValue(incomingThink, validatedCapabilities, { fallbackToBoolean: true });
+  const usedBooleanFallback = validatedCapabilities === null
+    && typeof incomingThink === 'string'
+    && isThinkingEnabled(mappedThink);
   const thinkMapped = mappedThink !== incomingThink;
   const mappedBody = thinkMapped ? { ...body, think: mappedThink } : body;
   const unchanged = {
@@ -171,7 +179,7 @@ export async function normalizeThinkForModel(config, model, body, reasoningProfi
 
   const lookup = capabilityLookup || createModelCapabilityLookup(config, model);
   const capabilityResult = await lookup();
-  if (!capabilityResult.known) return unchanged;
+  if (!capabilityResult.known && !usedBooleanFallback) return unchanged;
   if (capabilityResult.capabilities.includes('thinking')) {
     return { ...unchanged, thinkingSupported: true };
   }
@@ -185,7 +193,7 @@ export async function normalizeThinkForModel(config, model, body, reasoningProfi
     thinkMapped,
     thinkDropped: true,
     thinkNormalized: true,
-    thinkingSupported: false
+    thinkingSupported: capabilityResult.known ? false : null
   };
 }
 
