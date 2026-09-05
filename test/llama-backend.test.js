@@ -176,6 +176,7 @@ async function makeFixture({
   reasoningPolicy = REASONING_POLICY,
   model = PINNED,
   tools = false,
+  vision = false,
   unsupportedToolsPolicy = 'passthrough'
 } = {}) {
   const backend = createFakeLlama();
@@ -194,13 +195,14 @@ async function makeFixture({
     default_output_tokens: 512,
     context_safety_reserve: 1024,
     max_active_requests: 2,
-    input_modalities: ['text'],
+    input_modalities: vision ? ['text', 'image'] : ['text'],
     prompt_cache_mode: 'volatile_slot_lcp',
     capability_profile: {
       prompt_cache_volatile: true,
       prompt_cache_persistence: false,
       tools,
-      reasoning
+      reasoning,
+      vision
     },
     ...(reasoning ? { reasoning_policy: reasoningPolicy } : {})
   };
@@ -359,6 +361,164 @@ test('llama.cpp capability and context policies reject before generation', async
       assert.equal((await response.json()).error.code, item.code);
     }
     assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('a text-only llama.cpp marker rejects image-bearing Responses tool history before inference', async () => {
+  const fixture = await makeFixture({ tools: true, vision: false });
+  try {
+    const response = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: [
+        { role: 'user', content: 'Capture the browser.' },
+        {
+          type: 'function_call',
+          call_id: 'call_screenshot_1',
+          name: 'browser_screenshot',
+          arguments: '{}'
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_screenshot_1',
+          output: [{
+            type: 'input_image',
+            image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB'
+          }]
+        }
+      ],
+      tools: [{
+        type: 'function',
+        name: 'browser_screenshot',
+        parameters: { type: 'object', properties: {} }
+      }],
+      stream: false,
+      store: false,
+      max_output_tokens: 32
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 400, JSON.stringify(payload));
+    assert.equal(payload.error.code, 'UNSUPPORTED_PROFILE_CAPABILITY');
+    assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/apply-template').length, 0);
+    assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp vision is marker-driven across native chat, Chat Completions, Responses, and tool-result history', async () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+  const dataUrl = `data:image/png;base64,${png}`;
+  const fixture = await makeFixture({
+    model: 'orion-vision-synthetic',
+    tools: true,
+    vision: true,
+    unsupportedToolsPolicy: 'reject'
+  });
+  try {
+    const openAi = await post(fixture.apiPort, '/v1/chat/completions', {
+      model: 'local-active',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Describe this image.' },
+          { type: 'image_url', image_url: { url: dataUrl, detail: 'auto' } }
+        ]
+      }],
+      stream: false,
+      max_tokens: 32
+    });
+    assert.equal(openAi.status, 200, await openAi.text());
+
+    const native = await post(fixture.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'Describe this screenshot.', images: [png] }],
+      stream: false,
+      options: { num_predict: 32 }
+    });
+    assert.equal(native.status, 200, await native.text());
+
+    const responses = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Describe this attachment.' },
+          { type: 'input_image', image_url: dataUrl }
+        ]
+      }],
+      stream: false,
+      store: false,
+      max_output_tokens: 32
+    });
+    assert.equal(responses.status, 200, await responses.text());
+
+    const responseWithToolImage = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: [
+        { role: 'user', content: 'Capture and inspect the browser.' },
+        {
+          type: 'function_call',
+          call_id: 'call_screenshot_1',
+          name: 'browser_screenshot',
+          arguments: '{}'
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_screenshot_1',
+          output: [
+            { type: 'input_text', text: 'Screenshot captured.' },
+            { type: 'input_image', image_url: dataUrl, detail: 'auto' }
+          ]
+        }
+      ],
+      tools: [{
+        type: 'function',
+        name: 'browser_screenshot',
+        parameters: { type: 'object', properties: {} }
+      }],
+      stream: false,
+      store: false,
+      max_output_tokens: 32
+    });
+    assert.equal(responseWithToolImage.status, 200, await responseWithToolImage.text());
+
+    const generation = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generation.length, 4);
+    assert.deepEqual(generation[0].body.messages[0].content, [
+      { type: 'text', text: 'Describe this image.' },
+      { type: 'image_url', image_url: { url: dataUrl, detail: 'auto' } }
+    ]);
+    assert.deepEqual(generation[1].body.messages[0].content, [
+      { type: 'text', text: 'Describe this screenshot.' },
+      { type: 'image_url', image_url: { url: png } }
+    ]);
+    assert.deepEqual(generation[2].body.messages[0].content, [
+      { type: 'text', text: 'Describe this attachment.' },
+      { type: 'image_url', image_url: { url: png } }
+    ]);
+    assert.equal(generation[3].body.messages[2].role, 'tool');
+    assert.equal(generation[3].body.messages[2].content, 'Screenshot captured.');
+    assert.deepEqual(generation[3].body.messages[3], {
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Image output from tool browser_screenshot (call call_screenshot_1).' },
+        { type: 'image_url', image_url: { url: png } }
+      ]
+    });
+
+    const loggedToolImageRequest = fixture.context.store.recentRequests(20)
+      .find((request) => request.endpoint === '/v1/responses'
+        && request.bodySummary?.inputCount === 3
+        && request.bodySummary?.inputImageCount === 1);
+    assert.ok(loggedToolImageRequest);
+
+    const discovery = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
+    const entry = (await discovery.json()).data[0].x_ollama_router;
+    assert.ok(entry.capabilities.includes('vision'));
+    assert.deepEqual(entry.input_modalities, ['text', 'image']);
   } finally {
     await fixture.cleanup();
   }

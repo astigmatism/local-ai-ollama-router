@@ -63,7 +63,12 @@ Marker format:
   "keep_alive": -1,
   "context_length": 16384,
   "max_output_tokens": 2048,
-  "input_modalities": ["text"],
+  "input_modalities": ["text", "image"],
+  "backend_kind": "llama_cpp",
+  "capability_profile": {
+    "tools": true,
+    "vision": true
+  },
   "supported_think_levels": ["low", "medium"],
   "reasoning_effort_map": {
     "minimal": "low",
@@ -79,6 +84,8 @@ Marker format:
 ```
 
 The canonical optional discovery fields are `context_length`, `max_output_tokens`, `input_modalities`, and `revision`. Existing context hints (`context`, `num_ctx`, `numCtx`, or `options.num_ctx`) remain accepted, as do the documented compatibility aliases in [Stable Active-Model Discovery](MODEL_DISCOVERY.md). Older markers do not need any new field.
+
+For a `llama_cpp` deployment, `capability_profile.tools` and `capability_profile.vision` are profile-owned authorization facts rather than model-name heuristics. Set `vision: true` and include `image` in `input_modalities` only after the running backend has loaded the exact matching multimodal projector and `GET /props` reports `modalities.vision: true`. The usual llama.cpp startup control is `--mmproj /path/to/mmproj-*.gguf`. The projector revision must match the deployed model artifacts. A marker update must not advertise vision merely because the base checkpoint family is multimodal.
 
 Reasoning capability metadata belongs to the active deployment profile; the router does not infer it from `model` or `profile` names. When configured, `supported_think_levels` and `reasoning_effort_map` must appear together. The map must define `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A string target must be listed in `supported_think_levels`; boolean `true` selects the model/runtime's enabled default reasoning mode and need not be listed. No other boolean target is valid. `none` is not part of the map because it always becomes boolean `false`. With neither field configured, generation falls back to Ollama's binary `thinking` capability and uses boolean `true` for any enabled effort. Invalid/incomplete explicit profiles fail generation with HTTP 503 before an upstream generation request.
 

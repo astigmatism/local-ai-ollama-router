@@ -643,6 +643,48 @@ test('request translation reconstructs multiple function calls and ordered outpu
   assert.equal(translated.upstreamBody.tools[0].function.name, 'lookup');
 });
 
+test('request translation preserves image-bearing function output as associated tool text plus a user image turn', () => {
+  const translated = translateResponsesRequest({
+    input: [
+      { role: 'user', content: 'capture the browser' },
+      { type: 'function_call', call_id: 'call_screen', name: 'browser_screenshot', arguments: '{}' },
+      {
+        type: 'function_call_output',
+        call_id: 'call_screen',
+        output: [
+          { type: 'input_text', text: 'Screenshot captured.' },
+          { type: 'input_image', image_url: 'data:image/png;base64,aGVsbG8=' }
+        ]
+      }
+    ],
+    tools: [{ type: 'function', name: 'browser_screenshot', parameters: { type: 'object' } }]
+  }, 'active:model', -1);
+
+  assert.deepEqual(translated.upstreamBody.messages, [
+    { role: 'user', content: 'capture the browser' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [{
+        id: 'call_screen',
+        type: 'function',
+        function: { name: 'browser_screenshot', arguments: {} }
+      }]
+    },
+    {
+      role: 'tool',
+      tool_name: 'browser_screenshot',
+      tool_call_id: 'call_screen',
+      content: 'Screenshot captured.'
+    },
+    {
+      role: 'user',
+      content: 'Image output from tool browser_screenshot (call call_screen).',
+      images: ['aGVsbG8=']
+    }
+  ]);
+});
+
 test('request translation rejects unknown/duplicate call IDs and malformed arguments', () => {
   const cases = [
     {

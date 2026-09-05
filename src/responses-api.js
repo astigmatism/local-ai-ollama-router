@@ -101,6 +101,13 @@ function translateMessageContent(content, role, param) {
   return { content: textParts.join(''), images };
 }
 
+function translateFunctionCallOutput(output, param) {
+  if (!Array.isArray(output)) {
+    return { content: normalizeTextValue(output, param), images: [] };
+  }
+  return translateMessageContent(output, 'user', param);
+}
+
 function parseFunctionArguments(value, param) {
   let parsed = value;
   if (typeof value === 'string') {
@@ -289,12 +296,21 @@ function translateInput(input, instructions, toolNames) {
       }
       if (completedCalls.has(callId)) invalid('DUPLICATE_TOOL_OUTPUT', `Duplicate output for function call_id: ${callId}.`, `${param}.call_id`);
       completedCalls.add(callId);
+      const output = translateFunctionCallOutput(item.output, `${param}.output`);
+      const toolName = knownCalls.get(callId);
       messages.push({
         role: 'tool',
-        tool_name: knownCalls.get(callId),
+        tool_name: toolName,
         tool_call_id: callId,
-        content: normalizeTextValue(item.output, `${param}.output`)
+        content: output.content || (output.images.length ? '(see attached image)' : '')
       });
+      if (output.images.length) {
+        messages.push({
+          role: 'user',
+          content: `Image output from tool ${toolName} (call ${callId}).`,
+          images: output.images
+        });
+      }
       continue;
     }
 

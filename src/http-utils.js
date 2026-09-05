@@ -126,6 +126,16 @@ export function summarizeBody(body, mode = 'metadata') {
   if (mode === 'full') return body;
 
   const summary = {};
+  const countImages = (value) => {
+    if (Array.isArray(value)) return value.reduce((total, item) => total + countImages(item), 0);
+    if (!value || typeof value !== 'object') return 0;
+    let total = ['image', 'image_url', 'input_image'].includes(value.type) ? 1 : 0;
+    for (const [key, nested] of Object.entries(value)) {
+      if (key === 'images' && Array.isArray(nested)) total += nested.length;
+      else if (key !== 'image_url') total += countImages(nested);
+    }
+    return total;
+  };
   if (typeof body.prompt === 'string') summary.promptChars = body.prompt.length;
   if (typeof body.system === 'string') summary.systemChars = body.system.length;
   if (Array.isArray(body.messages)) {
@@ -137,9 +147,15 @@ export function summarizeBody(body, mode = 'metadata') {
       if (Array.isArray(content)) return total + JSON.stringify(content).length;
       return total;
     }, 0);
+    const messageImageCount = countImages(body.messages);
+    if (messageImageCount > 0) summary.messageImageCount = messageImageCount;
   }
   if (Array.isArray(body.images)) summary.imageCount = body.images.length;
-  if (Array.isArray(body.input)) summary.inputCount = body.input.length;
+  if (Array.isArray(body.input)) {
+    summary.inputCount = body.input.length;
+    const inputImageCount = countImages(body.input);
+    if (inputImageCount > 0) summary.inputImageCount = inputImageCount;
+  }
   if (typeof body.input === 'string') summary.inputChars = body.input.length;
   if (typeof body.stream === 'boolean') summary.stream = body.stream;
   if (body.options && typeof body.options === 'object') summary.optionKeys = Object.keys(body.options).sort();

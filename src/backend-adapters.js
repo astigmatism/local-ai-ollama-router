@@ -34,15 +34,6 @@ function clonedConfig(config, upstreamUrl) {
   return { ...config, upstreamUrl: String(upstreamUrl || config.upstreamUrl).replace(/\/+$/, '') };
 }
 
-function chatText(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .filter((part) => isPlainObject(part) && ['text', 'input_text', 'output_text'].includes(part.type) && typeof part.text === 'string')
-    .map((part) => part.text)
-    .join('');
-}
-
 function hasMultimodalContent(messages) {
   return (Array.isArray(messages) ? messages : []).some((message) => {
     if (Array.isArray(message?.images) && message.images.length) return true;
@@ -115,7 +106,7 @@ const STRICT_REASONING_CONTROL_FIELDS = new Set([
   'chat_template_kwargs'
 ]);
 
-function rejectUnsupportedFields(body, { allowTools = false } = {}) {
+function rejectUnsupportedFields(body, { allowTools = false, allowVision = false } = {}) {
   for (const field of STRICT_REASONING_CONTROL_FIELDS) {
     if (Object.hasOwn(body || {}, field)) {
       throw new BackendAdapterError(
@@ -137,7 +128,7 @@ function rejectUnsupportedFields(body, { allowTools = false } = {}) {
       );
     }
   }
-  if (hasMultimodalContent(body?.messages)) {
+  if (!allowVision && hasMultimodalContent(body?.messages)) {
     throw new BackendAdapterError(
       400,
       'UNSUPPORTED_PROFILE_CAPABILITY',
@@ -175,6 +166,113 @@ function rejectUnsupportedFields(body, { allowTools = false } = {}) {
       );
     }
   }
+}
+
+function imageSource(value, param, { allowRawBase64 = false } = {}) {
+  if (typeof value !== 'string' || !value) {
+    throw new BackendAdapterError(400, 'INVALID_IMAGE_INPUT', `${param} must contain non-empty base64 image data.`, param);
+  }
+  const compact = value.replace(/[\r\n]/g, '');
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+$/.test(compact)) return compact;
+  if (allowRawBase64 && /^[A-Za-z0-9+/=]+$/.test(compact)) return compact;
+  throw new BackendAdapterError(
+    400,
+    'UNSUPPORTED_IMAGE_INPUT',
+    `${param} must use inline base64 image data; remote URLs and filesystem paths are not accepted.`,
+    param
+  );
+}
+
+function mappedMessageContent(message, index, allowVision) {
+  const param = `messages[${index}]`;
+  const role = message?.role;
+  const content = message?.content;
+  const parts = [];
+
+  if (typeof content === 'string' || content === undefined || content === null) {
+    if (typeof content === 'string' && content) parts.push({ type: 'text', text: content });
+  } else if (Array.isArray(content)) {
+    for (let partIndex = 0; partIndex < content.length; partIndex += 1) {
+      const part = content[partIndex];
+      const partParam = `${param}.content[${partIndex}]`;
+      if (!isPlainObject(part) || typeof part.type !== 'string') {
+        throw new BackendAdapterError(400, 'INVALID_MESSAGE_CONTENT', `${partParam} must be a typed content object.`, partParam);
+      }
+      if (['text', 'input_text', 'output_text'].includes(part.type)) {
+        if (typeof part.text !== 'string') {
+          throw new BackendAdapterError(400, 'INVALID_MESSAGE_CONTENT', `${partParam}.text must be a string.`, `${partParam}.text`);
+        }
+        if (part.text) parts.push({ type: 'text', text: part.text });
+        continue;
+      }
+      if (!allowVision) {
+        throw new BackendAdapterError(
+          400,
+          'UNSUPPORTED_PROFILE_CAPABILITY',
+          'Multimodal message content is not supported by the active model profile.',
+          partParam
+        );
+      }
+      if (role !== 'user') {
+        throw new BackendAdapterError(400, 'UNSUPPORTED_IMAGE_ROLE', 'Images are supported only in user messages.', partParam);
+      }
+      if (part.type === 'image_url') {
+        const image = isPlainObject(part.image_url) ? part.image_url : null;
+        if (!image) {
+          throw new BackendAdapterError(400, 'INVALID_IMAGE_INPUT', `${partParam}.image_url must be an object.`, `${partParam}.image_url`);
+        }
+        const url = imageSource(image.url, `${partParam}.image_url.url`);
+        const detail = image.detail;
+        if (detail !== undefined && !['auto', 'low', 'high'].includes(detail)) {
+          throw new BackendAdapterError(400, 'INVALID_IMAGE_INPUT', `${partParam}.image_url.detail must be auto, low, or high.`, `${partParam}.image_url.detail`);
+        }
+        parts.push({
+          type: 'image_url',
+          image_url: { url, ...(detail === undefined ? {} : { detail }) }
+        });
+        continue;
+      }
+      if (part.type === 'input_image') {
+        const url = imageSource(part.image_url, `${partParam}.image_url`);
+        parts.push({ type: 'image_url', image_url: { url } });
+        continue;
+      }
+      throw new BackendAdapterError(
+        400,
+        'UNSUPPORTED_PROFILE_CAPABILITY',
+        `Content part type ${part.type} is not supported by the active model profile.`,
+        `${partParam}.type`
+      );
+    }
+  } else {
+    throw new BackendAdapterError(400, 'INVALID_MESSAGE_CONTENT', `${param}.content must be text or an array of content parts.`, `${param}.content`);
+  }
+
+  if (message?.images !== undefined && !Array.isArray(message.images)) {
+    throw new BackendAdapterError(400, 'INVALID_IMAGE_INPUT', `${param}.images must be an array.`, `${param}.images`);
+  }
+  if (Array.isArray(message?.images) && message.images.length) {
+    if (!allowVision) {
+      throw new BackendAdapterError(
+        400,
+        'UNSUPPORTED_PROFILE_CAPABILITY',
+        'Multimodal message content is not supported by the active model profile.',
+        `${param}.images`
+      );
+    }
+    if (role !== 'user') {
+      throw new BackendAdapterError(400, 'UNSUPPORTED_IMAGE_ROLE', 'Images are supported only in user messages.', `${param}.images`);
+    }
+    message.images.forEach((value, imageIndex) => {
+      parts.push({
+        type: 'image_url',
+        image_url: { url: imageSource(value, `${param}.images[${imageIndex}]`, { allowRawBase64: true }) }
+      });
+    });
+  }
+
+  const hasImage = parts.some((part) => part.type === 'image_url');
+  return hasImage ? parts : parts.filter((part) => part.type === 'text').map((part) => part.text).join('');
 }
 
 function parseToolArguments(value, param) {
@@ -280,7 +378,7 @@ export function normalizeLlamaToolRequest(body, activeModel, protocol) {
   };
 }
 
-function messagesForLlama(messages, protocol) {
+function messagesForLlama(messages, protocol, allowVision = false) {
   const knownCalls = new Map();
   const pendingCalls = [];
   const usedResults = new Set();
@@ -315,15 +413,19 @@ function messagesForLlama(messages, protocol) {
       if (message?.content !== undefined && typeof message.content !== 'string' && !Array.isArray(message.content)) {
         throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}].content must be text.`, `messages[${index}].content`);
       }
+      const content = mappedMessageContent(message, index, allowVision);
+      if (Array.isArray(content)) {
+        throw new BackendAdapterError(400, 'UNSUPPORTED_IMAGE_ROLE', 'Images are supported only in user messages.', `messages[${index}].content`);
+      }
       return {
         role: 'tool',
-        content: chatText(message?.content),
+        content,
         tool_call_id: resolved.id,
         name: resolved.name
       };
     }
 
-    const mapped = { role, content: chatText(message?.content) };
+    const mapped = { role, content: mappedMessageContent(message, index, allowVision) };
     const reasoningValue = protocol === 'openai-chat' ? message?.reasoning_content : message?.thinking;
     const reasoningField = protocol === 'openai-chat' ? 'reasoning_content' : 'thinking';
     if (reasoningValue !== undefined) {
@@ -644,7 +746,8 @@ export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
     delete cleanBody.options.reasoning_effort;
   }
   rejectUnsupportedFields(cleanBody, {
-    allowTools: activeModel?.capability_profile?.tools === true && protocol !== 'native-generate'
+    allowTools: activeModel?.capability_profile?.tools === true && protocol !== 'native-generate',
+    allowVision: activeModel?.capability_profile?.vision === true && protocol !== 'native-generate'
   });
 
   const controls = entry.enabled
@@ -1125,7 +1228,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
         capabilities: [
           'completion',
           ...(this.activeModel.reasoning_policy ? ['thinking'] : []),
-          ...(this.activeModel.capability_profile?.tools === true ? ['tools'] : [])
+          ...(this.activeModel.capability_profile?.tools === true ? ['tools'] : []),
+          ...(this.activeModel.capability_profile?.vision === true ? ['vision'] : [])
         ],
         details: { backend: 'llama_cpp' },
         model_info: { context_length: this.activeModel.context_length }
@@ -1214,7 +1318,11 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     const reasoning = normalizeLlamaReasoningRequest(body, this.activeModel, protocol);
     const toolRequest = normalizeLlamaToolRequest(reasoning.cleanBody, this.activeModel, protocol);
     const outputTokens = reasoning.outputTokens;
-    const mappedMessages = messagesForLlama(messages, protocol);
+    const mappedMessages = messagesForLlama(
+      messages,
+      protocol,
+      this.activeModel.capability_profile?.vision === true && protocol !== 'native-generate'
+    );
     const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
     const context = await this.validateContext(mappedMessages, outputTokens, templateControls);
     const temperature = Number(body?.temperature ?? body?.options?.temperature ?? 0);
@@ -1262,7 +1370,11 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     const reasoning = normalizeLlamaReasoningRequest(translated.originalBody || {}, this.activeModel, 'responses');
     const toolRequest = normalizeLlamaToolRequest(translated.upstreamBody, this.activeModel, 'responses');
     const outputTokens = reasoning.outputTokens;
-    const messages = messagesForLlama(translated.upstreamBody.messages, 'responses');
+    const messages = messagesForLlama(
+      translated.upstreamBody.messages,
+      'responses',
+      this.activeModel.capability_profile?.vision === true
+    );
     const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
     const body = {
       model: this.activeModel.model,

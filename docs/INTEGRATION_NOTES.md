@@ -30,6 +30,8 @@ If Open WebUI sends native tools to a deployed profile whose active marker has `
 
 A `llama_cpp` profile may set `capability_profile.tools: true` only after its server flags and chat template have been probed successfully for structured function calls. The router then exposes `tools` in `x_ollama_router.capabilities`, forwards definitions and history through Chat Completions, and translates calls for Ollama-native and Responses clients. Switching profiles changes this behavior entirely through the marker; no router model-name list is involved.
 
+A `llama_cpp` profile may set `capability_profile.vision: true` only after the matching projector is loaded and the running server's `/props` response reports `modalities.vision: true`. Include both `text` and `image` in the marker's `input_modalities`. The router then exposes `vision`, preserves native/Chat/Responses inline images, and bridges image-bearing Responses tool outputs into a text tool result plus a user image turn. Keep `vision: false` and advertise only `text` for any profile that omits the projector or cannot satisfy its GPU-memory budget.
+
 ## Codex
 
 Configure Codex's custom Responses provider with the exact `ROUTER_MODEL_ALIAS`, normally `model = "local-active"`. Codex may retain that identifier across profile changes: request history records it as `requestedModel`, while `activeModel` and `forwardedModel` show the marker model that Ollama actually received. The alias works in strict mode; `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` is needed only if other arbitrary names should also be advisory.
