@@ -1,0 +1,999 @@
+import { TextDecoder, TextEncoder } from 'node:util';
+import { upstreamFetch, upstreamJson } from './upstream.js';
+
+const encoder = new TextEncoder();
+const LLAMA_CPP_KIND = 'llama_cpp';
+const OLLAMA_KIND = 'ollama';
+const SAFE_POLICY_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
+
+export class BackendAdapterError extends Error {
+  constructor(statusCode, code, message, param = null) {
+    super(message);
+    this.name = 'BackendAdapterError';
+    this.statusCode = statusCode;
+    this.code = code;
+    this.param = param;
+  }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function positiveInteger(value, fallback = null) {
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) value = Number(value.trim());
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function nonNegativeInteger(value, fallback = null) {
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) value = Number(value.trim());
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function clonedConfig(config, upstreamUrl) {
+  return { ...config, upstreamUrl: String(upstreamUrl || config.upstreamUrl).replace(/\/+$/, '') };
+}
+
+function chatText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((part) => isPlainObject(part) && ['text', 'input_text', 'output_text'].includes(part.type) && typeof part.text === 'string')
+    .map((part) => part.text)
+    .join('');
+}
+
+function hasMultimodalContent(messages) {
+  return (Array.isArray(messages) ? messages : []).some((message) => {
+    if (Array.isArray(message?.images) && message.images.length) return true;
+    if (!Array.isArray(message?.content)) return false;
+    return message.content.some((part) => !['text', 'input_text', 'output_text'].includes(part?.type));
+  });
+}
+
+const UNSUPPORTED_CONTROL_FIELDS = new Set([
+  'reasoning',
+  'reasoning_effort',
+  'reasoning_budget_tokens',
+  'reasoning_budget_message',
+  'reasoning_control',
+  'reasoning_format',
+  'think',
+  'thinking',
+  'thinking_budget_tokens',
+  'chat_template_kwargs',
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'functions',
+  'function_call',
+  'images',
+  'audio',
+  'video',
+  'mmproj',
+  'draft_model',
+  'speculative',
+  'id_slot',
+  'cache_prompt',
+  'prompt_cache_key',
+  'cache_id',
+  'cache_ram',
+  'cache_idle_slots',
+  'cache_reuse',
+  'n_cache_reuse',
+  'cache_path',
+  'cache_dir',
+  'cache_file',
+  'slot_action',
+  'slot_save_path',
+  'slot_restore_path',
+  'slot_erase',
+  'n_keep',
+  'n_discard',
+  'slot_id',
+  'backend',
+  'backend_url',
+  'upstream_url'
+]);
+
+const STRICT_REASONING_CONTROL_FIELDS = new Set([
+  'reasoning_budget_tokens',
+  'reasoning_budget_message',
+  'reasoning_control',
+  'reasoning_format',
+  'thinking',
+  'thinking_budget_tokens',
+  'chat_template_kwargs'
+]);
+
+function rejectUnsupportedFields(body) {
+  for (const field of STRICT_REASONING_CONTROL_FIELDS) {
+    if (Object.hasOwn(body || {}, field)) {
+      throw new BackendAdapterError(
+        400,
+        'UNTRUSTED_REASONING_CONTROL',
+        `Caller-supplied ${field} is not accepted by the active model profile.`,
+        field
+      );
+    }
+  }
+  for (const field of UNSUPPORTED_CONTROL_FIELDS) {
+    if (Object.hasOwn(body || {}, field) && body[field] !== null && body[field] !== false) {
+      throw new BackendAdapterError(
+        400,
+        'UNSUPPORTED_PROFILE_CAPABILITY',
+        `Field ${field} is not supported by the active model profile.`,
+        field
+      );
+    }
+  }
+  if (hasMultimodalContent(body?.messages)) {
+    throw new BackendAdapterError(
+      400,
+      'UNSUPPORTED_PROFILE_CAPABILITY',
+      'Multimodal message content is not supported by the active model profile.',
+      'messages'
+    );
+  }
+  const options = isPlainObject(body?.options) ? body.options : {};
+  for (const field of [
+    'num_ctx',
+    'num_gpu',
+    'main_gpu',
+    'tensor_split',
+    'split_mode',
+    'numa',
+    'num_thread',
+    'cache_prompt',
+    'cache_ram',
+    'cache_idle_slots',
+    'cache_reuse',
+    'n_cache_reuse',
+    'cache_path',
+    'id_slot',
+    'slot_id',
+    'slot_action',
+    'slot_save_path',
+    'slot_restore_path'
+  ]) {
+    if (Object.hasOwn(options, field)) {
+      throw new BackendAdapterError(
+        400,
+        'BACKEND_CONTROL_FORBIDDEN',
+        `Backend control options.${field} cannot be supplied through the router.`,
+        `options.${field}`
+      );
+    }
+  }
+}
+
+function messagesForLlama(messages, protocol) {
+  return messages.map((message, index) => {
+    const role = message?.role;
+    const mapped = { role, content: chatText(message?.content) };
+    const reasoningValue = protocol === 'openai-chat' ? message?.reasoning_content : message?.thinking;
+    const reasoningField = protocol === 'openai-chat' ? 'reasoning_content' : 'thinking';
+    if (reasoningValue !== undefined) {
+      if (role !== 'assistant' || typeof reasoningValue !== 'string') {
+        throw new BackendAdapterError(400, 'INVALID_REASONING_HISTORY', `${reasoningField} is accepted only as string content on assistant history messages.`, `messages[${index}].${reasoningField}`);
+      }
+      if (reasoningValue) mapped.reasoning_content = reasoningValue;
+    }
+    const alternate = protocol === 'openai-chat' ? message?.thinking : message?.reasoning_content;
+    if (alternate !== undefined) {
+      const alternateField = protocol === 'openai-chat' ? 'thinking' : 'reasoning_content';
+      throw new BackendAdapterError(400, 'INVALID_REASONING_HISTORY', `${alternateField} is not valid for this public route.`, `messages[${index}].${alternateField}`);
+    }
+    return mapped;
+  });
+}
+
+export function validatedReasoningPolicy(activeModel) {
+  const policy = activeModel?.reasoning_policy;
+  if (!isPlainObject(policy)) return null;
+  if (policy.schema_version !== undefined && policy.schema_version !== 1) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The active reasoning policy schema version is not supported.');
+  }
+  if (!isPlainObject(policy.levels) || Object.keys(policy.levels).length === 0) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The active reasoning policy levels are missing.');
+  }
+
+  const levels = {};
+  for (const [rawLevel, entry] of Object.entries(policy.levels)) {
+    const level = rawLevel.trim().toLowerCase();
+    if (rawLevel !== level || !SAFE_POLICY_NAME.test(level)) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The reasoning policy level ${rawLevel} is invalid.`);
+    }
+    if (!isPlainObject(entry)
+      || typeof entry.enabled !== 'boolean'
+      || positiveInteger(entry.default_output_tokens) === null
+      || positiveInteger(entry.max_output_tokens) === null
+      || entry.default_output_tokens > entry.max_output_tokens) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The active reasoning policy has an invalid ${level} level.`);
+    }
+    const normalizedEntry = {
+      enabled: entry.enabled,
+      default_output_tokens: entry.default_output_tokens,
+      max_output_tokens: entry.max_output_tokens
+    };
+    if (entry.enabled) {
+      if (typeof entry.template_effort !== 'string' || !SAFE_POLICY_NAME.test(entry.template_effort)) {
+        throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The ${level} template effort is invalid.`);
+      }
+      normalizedEntry.template_effort = entry.template_effort;
+      if (entry.reasoning_budget_tokens !== undefined
+        && entry.reasoning_budget_tokens !== -1
+        && positiveInteger(entry.reasoning_budget_tokens) === null) {
+        throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The ${level} reasoning budget is invalid.`);
+      }
+      if (entry.reasoning_budget_tokens !== undefined) {
+        normalizedEntry.reasoning_budget_tokens = entry.reasoning_budget_tokens;
+      }
+    } else if (Object.hasOwn(entry, 'template_effort') || Object.hasOwn(entry, 'reasoning_budget_tokens')) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The disabled ${level} level cannot define upstream reasoning controls.`);
+    }
+    levels[level] = normalizedEntry;
+  }
+
+  const aliases = {};
+  if (policy.aliases !== undefined && !isPlainObject(policy.aliases)) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning aliases must be an object.');
+  }
+  for (const [rawAlias, rawTarget] of Object.entries(policy.aliases || {})) {
+    const alias = rawAlias.trim().toLowerCase();
+    const target = typeof rawTarget === 'string' ? rawTarget.trim().toLowerCase() : '';
+    if (rawAlias !== alias || !SAFE_POLICY_NAME.test(alias) || !Object.hasOwn(levels, target)) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The reasoning alias ${rawAlias} is invalid.`);
+    }
+    if (Object.hasOwn(levels, alias) && alias !== target) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The reasoning alias ${alias} conflicts with a configured level.`);
+    }
+    aliases[alias] = target;
+  }
+
+  const defaultName = typeof policy.default_level === 'string' ? policy.default_level.trim().toLowerCase() : '';
+  const defaultLevel = aliases[defaultName] || defaultName;
+  if (!Object.hasOwn(levels, defaultLevel)) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning default level is invalid.');
+  }
+
+  const answerReserve = nonNegativeInteger(policy.answer_reserve, 0);
+  if (answerReserve === null) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning answer reserve is invalid.');
+  }
+  for (const [level, entry] of Object.entries(levels)) {
+    if (positiveInteger(entry.reasoning_budget_tokens) !== null
+      && entry.default_output_tokens < entry.reasoning_budget_tokens + answerReserve) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The ${level} default does not reserve enough visible-answer capacity.`);
+    }
+  }
+
+  const outputLimitPolicy = policy.output_limit_policy ?? 'reject';
+  if (!['cap', 'reject'].includes(outputLimitPolicy)) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning output limit policy must be cap or reject.');
+  }
+  const booleanTrueBehavior = policy.boolean_true_behavior ?? { mode: 'reject' };
+  if (!isPlainObject(booleanTrueBehavior) || !['reject', 'map', 'passthrough'].includes(booleanTrueBehavior.mode)) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The boolean true behavior is invalid.');
+  }
+  let booleanLevel = null;
+  if (booleanTrueBehavior.mode !== 'reject') {
+    const rawBooleanLevel = typeof booleanTrueBehavior.level === 'string'
+      ? booleanTrueBehavior.level.trim().toLowerCase()
+      : '';
+    booleanLevel = aliases[rawBooleanLevel] || rawBooleanLevel;
+    if (!Object.hasOwn(levels, booleanLevel) || !levels[booleanLevel].enabled) {
+      throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The boolean true behavior must name an enabled level.');
+    }
+  }
+
+  const reasoningFormat = policy.reasoning_format ?? null;
+  if (reasoningFormat !== null
+    && (typeof reasoningFormat !== 'string' || !SAFE_POLICY_NAME.test(reasoningFormat))) {
+    throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning format is invalid.');
+  }
+
+  return {
+    schema_version: 1,
+    default_level: defaultLevel,
+    aliases,
+    boolean_true_behavior: {
+      mode: booleanTrueBehavior.mode,
+      ...(booleanLevel ? { level: booleanLevel } : {})
+    },
+    output_limit_policy: outputLimitPolicy,
+    answer_reserve: answerReserve,
+    reasoning_format: reasoningFormat,
+    levels
+  };
+}
+
+function reasoningParam(protocol) {
+  return protocol === 'native-chat' || protocol === 'native-generate' ? 'think' : 'reasoning_effort';
+}
+
+function normalizeNamedReasoningLevel(value, protocol, policy, param = reasoningParam(protocol)) {
+  if (typeof value !== 'string') {
+    throw new BackendAdapterError(400, 'INVALID_REASONING_LEVEL', 'Reasoning must be a named level.', param);
+  }
+  const normalized = value.trim().toLowerCase();
+  const level = policy?.aliases?.[normalized] || (normalized === 'none' ? 'off' : normalized);
+  if (!policy && level !== 'off') {
+    throw new BackendAdapterError(400, 'UNSUPPORTED_PROFILE_CAPABILITY', 'Reasoning is not enabled for the active model profile.', param);
+  }
+  if (policy && !Object.hasOwn(policy.levels, level)) {
+    const supported = [...Object.keys(policy.levels), ...Object.keys(policy.aliases)].join(', ');
+    throw new BackendAdapterError(400, 'INVALID_REASONING_LEVEL', `Unsupported reasoning level ${String(value)}; supported values are ${supported}.`, param);
+  }
+  return level;
+}
+
+function resolveReasoningInputs(inputs, protocol, policy) {
+  const present = inputs.filter(({ value }) => value !== undefined && value !== null);
+  const named = present
+    .filter(({ value }) => typeof value === 'string')
+    .map(({ value, param }) => ({ level: normalizeNamedReasoningLevel(value, protocol, policy, param), param }));
+  if (present.some(({ value }) => typeof value !== 'string' && typeof value !== 'boolean')) {
+    const invalid = present.find(({ value }) => typeof value !== 'string' && typeof value !== 'boolean');
+    throw new BackendAdapterError(400, 'INVALID_REASONING_LEVEL', 'Reasoning must be a boolean or named level.', invalid.param);
+  }
+  if (new Set(named.map(({ level }) => level)).size > 1) {
+    throw new BackendAdapterError(400, 'CONFLICTING_REASONING_EFFORT', 'Supplied reasoning levels resolve to different efforts.', named.at(-1)?.param || reasoningParam(protocol));
+  }
+  const namedLevel = named[0]?.level;
+  if (present.some(({ value }) => value === false) && namedLevel && !policy?.levels?.[namedLevel]?.enabled) {
+    return namedLevel;
+  }
+  if (present.some(({ value }) => value === false) && namedLevel) {
+    throw new BackendAdapterError(400, 'CONFLICTING_REASONING_EFFORT', 'Reasoning cannot be explicitly disabled while a named enabled effort is requested.', named.at(-1)?.param || reasoningParam(protocol));
+  }
+  if (namedLevel) return namedLevel;
+  if (present.some(({ value }) => value === false)) {
+    const disabled = Object.entries(policy?.levels || {}).find(([, entry]) => !entry.enabled)?.[0];
+    return disabled || 'off';
+  }
+  if (present.some(({ value }) => value === true)) {
+    if (policy && policy.boolean_true_behavior.mode !== 'reject') return policy.boolean_true_behavior.level;
+    throw new BackendAdapterError(400, 'INVALID_REASONING_LEVEL', 'A named reasoning level is required; boolean true is not accepted.', present.find(({ value }) => value === true)?.param || reasoningParam(protocol));
+  }
+  return policy?.default_level || 'off';
+}
+
+function requestedReasoning(body, protocol, policy) {
+  if (protocol === 'openai-chat') {
+    return resolveReasoningInputs([{ value: body?.reasoning_effort, param: 'reasoning_effort' }], protocol, policy);
+  }
+  if (protocol === 'native-chat' || protocol === 'native-generate') {
+    return resolveReasoningInputs([
+      { value: body?.think, param: 'think' },
+      { value: body?.options?.reasoning_effort, param: 'options.reasoning_effort' }
+    ], protocol, policy);
+  }
+  if (protocol === 'responses') {
+    if (body?.reasoning !== undefined && body?.reasoning !== null && !isPlainObject(body.reasoning)) {
+      throw new BackendAdapterError(400, 'INVALID_REASONING_LEVEL', 'reasoning must be an object containing only effort.', 'reasoning');
+    }
+    const nestedKeys = isPlainObject(body?.reasoning) ? Object.keys(body.reasoning) : [];
+    if (nestedKeys.some((key) => !['effort', 'summary'].includes(key))) {
+      throw new BackendAdapterError(400, 'UNTRUSTED_REASONING_CONTROL', 'Only reasoning.effort and reasoning.summary are accepted by the active model profile.', 'reasoning');
+    }
+    if (body?.reasoning?.summary !== undefined
+      && !['auto', 'concise', 'detailed'].includes(body.reasoning.summary)) {
+      throw new BackendAdapterError(400, 'UNSUPPORTED_REASONING_SUMMARY', 'reasoning.summary must be auto, concise, or detailed.', 'reasoning.summary');
+    }
+    return resolveReasoningInputs([
+      { value: body?.reasoning?.effort, param: 'reasoning.effort' },
+      { value: body?.reasoning_effort, param: 'reasoning_effort' }
+    ], protocol, policy);
+  }
+  return policy?.default_level || 'off';
+}
+
+function requestedOutputLimit(body, protocol) {
+  if (protocol === 'openai-chat') {
+    const maxTokens = body?.max_tokens;
+    const maxCompletionTokens = body?.max_completion_tokens;
+    if (maxTokens !== undefined && maxCompletionTokens !== undefined && Number(maxTokens) !== Number(maxCompletionTokens)) {
+      throw new BackendAdapterError(400, 'CONFLICTING_OUTPUT_LIMITS', 'max_tokens and max_completion_tokens must match.', 'max_tokens');
+    }
+    return maxCompletionTokens ?? maxTokens;
+  }
+  if (protocol === 'responses') return body?.max_output_tokens;
+  return body?.options?.num_predict ?? body?.num_predict;
+}
+
+export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
+  const policy = validatedReasoningPolicy(activeModel);
+  const level = requestedReasoning(body, protocol, policy);
+  const enabled = policy?.levels?.[level]?.enabled === true;
+  if (protocol === 'native-generate' && enabled) {
+    throw new BackendAdapterError(400, 'REASONING_ROUTE_UNSUPPORTED', 'Enabled reasoning is supported on chat routes, not /api/generate.', 'think');
+  }
+
+  const entry = policy?.levels?.[level] || {
+    enabled: false,
+    default_output_tokens: positiveInteger(activeModel?.default_output_tokens, 512),
+    max_output_tokens: positiveInteger(activeModel?.max_output_tokens, 4096)
+  };
+  const rawLimit = requestedOutputLimit(body, protocol);
+  const requestedOutputTokens = rawLimit === undefined || rawLimit === null
+    ? null
+    : positiveInteger(rawLimit);
+  let outputTokens = requestedOutputTokens === null && rawLimit !== undefined && rawLimit !== null
+    ? null
+    : (requestedOutputTokens ?? entry.default_output_tokens);
+  const outputParam = protocol === 'responses' ? 'max_output_tokens' : (protocol.startsWith('native') ? 'options.num_predict' : 'max_tokens');
+  if (outputTokens === null) {
+    throw new BackendAdapterError(400, 'INVALID_OUTPUT_LIMIT', 'The requested output limit must be a positive integer.', outputParam);
+  }
+  const outputLimitCapped = outputTokens > entry.max_output_tokens && policy?.output_limit_policy === 'cap';
+  if (outputLimitCapped) outputTokens = entry.max_output_tokens;
+  if (outputTokens > entry.max_output_tokens) {
+    throw new BackendAdapterError(400, 'OUTPUT_LIMIT_EXCEEDED', `Reasoning level ${level} permits at most ${entry.max_output_tokens} total output tokens.`, outputParam);
+  }
+  if (entry.enabled && entry.reasoning_budget_tokens !== -1) {
+    const required = entry.reasoning_budget_tokens + policy.answer_reserve;
+    if (outputTokens < required) {
+      throw new BackendAdapterError(400, 'REASONING_OUTPUT_BUDGET_TOO_SMALL', `Reasoning level ${level} requires at least ${required} total output tokens (${entry.reasoning_budget_tokens} reasoning plus ${policy.answer_reserve} answer reserve).`, outputParam);
+    }
+  }
+
+  const cleanBody = { ...(body || {}) };
+  delete cleanBody.reasoning_effort;
+  delete cleanBody.reasoning;
+  delete cleanBody.think;
+  if (isPlainObject(cleanBody.options) && Object.hasOwn(cleanBody.options, 'reasoning_effort')) {
+    cleanBody.options = { ...cleanBody.options };
+    delete cleanBody.options.reasoning_effort;
+  }
+  rejectUnsupportedFields(cleanBody);
+
+  const controls = entry.enabled
+    ? {
+      chat_template_kwargs: { enable_thinking: true },
+      reasoning_effort: entry.template_effort,
+      ...(policy?.reasoning_format ? { reasoning_format: policy.reasoning_format } : {}),
+      ...(positiveInteger(entry.reasoning_budget_tokens) === null ? {} : { reasoning_budget_tokens: entry.reasoning_budget_tokens })
+    }
+    : { chat_template_kwargs: { enable_thinking: false } };
+
+  return {
+    level,
+    enabled: entry.enabled,
+    outputTokens,
+    requestedOutputTokens,
+    maxOutputTokens: entry.max_output_tokens,
+    outputLimitPolicy: policy?.output_limit_policy ?? 'reject',
+    outputLimitCapped,
+    answerReserve: policy?.answer_reserve ?? 0,
+    reasoningBudgetTokens: entry.reasoning_budget_tokens ?? null,
+    controls,
+    cleanBody
+  };
+}
+
+export function normalizeOutputLimit(body, activeModel, protocol = 'openai') {
+  const configuredDefault = positiveInteger(activeModel?.default_output_tokens, 512);
+  const configuredMax = positiveInteger(activeModel?.max_output_tokens, 4096);
+  let requested;
+  if (protocol === 'openai') {
+    const maxTokens = body?.max_tokens;
+    const maxCompletionTokens = body?.max_completion_tokens;
+    if (maxTokens !== undefined && maxCompletionTokens !== undefined && Number(maxTokens) !== Number(maxCompletionTokens)) {
+      throw new BackendAdapterError(400, 'CONFLICTING_OUTPUT_LIMITS', 'max_tokens and max_completion_tokens must match.', 'max_tokens');
+    }
+    requested = maxCompletionTokens ?? maxTokens;
+  } else {
+    requested = body?.options?.num_predict ?? body?.num_predict;
+  }
+  const limit = requested === undefined || requested === null
+    ? configuredDefault
+    : positiveInteger(requested);
+  if (limit === null) {
+    throw new BackendAdapterError(400, 'INVALID_OUTPUT_LIMIT', 'The requested output limit must be a positive integer.', 'max_tokens');
+  }
+  if (limit > configuredMax) {
+    throw new BackendAdapterError(
+      400,
+      'OUTPUT_LIMIT_EXCEEDED',
+      `The active profile permits at most ${configuredMax} output tokens.`,
+      'max_tokens'
+    );
+  }
+  return limit;
+}
+
+function completionUsage(payload) {
+  return {
+    prompt_eval_count: positiveInteger(payload?.usage?.prompt_tokens, 0),
+    eval_count: positiveInteger(payload?.usage?.completion_tokens, 0),
+    total_duration: null,
+    prompt_eval_duration: null,
+    eval_duration: null
+  };
+}
+
+export function openAiCompletionToOllama(payload, { kind, model }) {
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  const content = choice?.message?.content ?? choice?.text ?? '';
+  const thinking = typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content : '';
+  const usage = completionUsage(payload);
+  const common = {
+    model,
+    created_at: new Date().toISOString(),
+    done: true,
+    done_reason: choice?.finish_reason || 'stop',
+    prompt_eval_count: usage.prompt_eval_count,
+    eval_count: usage.eval_count,
+    ...(payload?.timings ? { timings: payload.timings } : {})
+  };
+  if (kind === 'native-generate') return { ...common, response: content };
+  return { ...common, message: { role: 'assistant', content, ...(thinking ? { thinking } : {}) } };
+}
+
+function sseFrames(buffer, flush = false) {
+  const normalized = buffer.replace(/\r\n/g, '\n');
+  const frames = normalized.split('\n\n');
+  if (!flush) return { frames: frames.slice(0, -1), remainder: frames.at(-1) || '' };
+  return { frames: frames.filter((frame) => frame.trim()), remainder: '' };
+}
+
+function dataLines(frame) {
+  return frame
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trimStart())
+    .join('\n');
+}
+
+export function openAiSseToOllamaStream(readable, { kind, model, usageState = {} }) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let doneSent = false;
+  let lastPayload = null;
+
+  const convertFrame = (frame, controller) => {
+    const data = dataLines(frame);
+    if (!data) return;
+    if (data === '[DONE]') {
+      if (!doneSent) {
+        const finalPayload = {
+          model,
+          created_at: new Date().toISOString(),
+          ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
+          done: true,
+          done_reason: lastPayload?.choices?.[0]?.finish_reason || 'stop',
+          prompt_eval_count: positiveInteger(lastPayload?.usage?.prompt_tokens, 0),
+          eval_count: positiveInteger(lastPayload?.usage?.completion_tokens, 0),
+          ...(lastPayload?.timings ? { timings: lastPayload.timings } : {})
+        };
+        controller.enqueue(encoder.encode(`${JSON.stringify(finalPayload)}\n`));
+        doneSent = true;
+      }
+      return;
+    }
+    let payload;
+    try {
+      payload = JSON.parse(data);
+    } catch {
+      throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_STREAM', 'llama.cpp returned malformed SSE JSON.');
+    }
+    lastPayload = payload;
+    if (payload.usage) usageState.usage = payload.usage;
+    const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+    const content = choice?.delta?.content ?? choice?.text ?? '';
+    const thinking = typeof choice?.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '';
+    if (thinking && kind !== 'native-generate') {
+      controller.enqueue(encoder.encode(`${JSON.stringify({
+        model,
+        created_at: new Date().toISOString(),
+        message: { role: 'assistant', content: '', thinking },
+        done: false
+      })}\n`));
+    }
+    if (content) {
+      const chunk = {
+        model,
+        created_at: new Date().toISOString(),
+        ...(kind === 'native-generate' ? { response: content } : { message: { role: 'assistant', content } }),
+        done: false
+      };
+      controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+    }
+    if (choice?.finish_reason && !doneSent) {
+      const finalPayload = {
+        model,
+        created_at: new Date().toISOString(),
+        ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
+        done: true,
+        done_reason: choice.finish_reason,
+        prompt_eval_count: positiveInteger(payload?.usage?.prompt_tokens, 0),
+        eval_count: positiveInteger(payload?.usage?.completion_tokens, 0),
+        ...(payload?.timings ? { timings: payload.timings } : {})
+      };
+      controller.enqueue(encoder.encode(`${JSON.stringify(finalPayload)}\n`));
+      doneSent = true;
+    }
+  };
+
+  return readable.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const parsed = sseFrames(buffer);
+      buffer = parsed.remainder;
+      for (const frame of parsed.frames) convertFrame(frame, controller);
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      const parsed = sseFrames(buffer, true);
+      for (const frame of parsed.frames) convertFrame(frame, controller);
+      if (!doneSent) {
+        throw new BackendAdapterError(502, 'INCOMPLETE_UPSTREAM_STREAM', 'llama.cpp ended its stream without a terminal event.');
+      }
+    }
+  }));
+}
+
+export function normalizeOpenAiSseModel(readable, model) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const emit = (frame, controller) => {
+    const data = dataLines(frame);
+    if (!data || data === '[DONE]') {
+      controller.enqueue(encoder.encode(`${frame}\n\n`));
+      return;
+    }
+    let payload;
+    try {
+      payload = JSON.parse(data);
+    } catch {
+      throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_STREAM', 'llama.cpp returned malformed SSE JSON.');
+    }
+    payload.model = model;
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+  };
+  return readable.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const parsed = sseFrames(buffer);
+      buffer = parsed.remainder;
+      for (const frame of parsed.frames) emit(frame, controller);
+    },
+    flush(controller) {
+      buffer += decoder.decode();
+      const parsed = sseFrames(buffer, true);
+      for (const frame of parsed.frames) emit(frame, controller);
+    }
+  }));
+}
+
+class BackendAdapter {
+  constructor(config, activeModel) {
+    this.config = config;
+    this.activeModel = activeModel;
+  }
+
+  get kind() {
+    return OLLAMA_KIND;
+  }
+
+  get upstreamConfig() {
+    return this.config;
+  }
+
+  get maxActiveRequests() {
+    return null;
+  }
+
+  async health() {
+    const started = Date.now();
+    try {
+      const version = await upstreamJson(this.upstreamConfig, '/api/version', { timeoutMs: 5000 });
+      return {
+        ok: version.ok,
+        status: version.status,
+        latencyMs: Date.now() - started,
+        backendKind: this.kind,
+        version: version.body,
+        error: version.ok ? null : version.text
+      };
+    } catch (error) {
+      return { ok: false, status: null, latencyMs: Date.now() - started, backendKind: this.kind, version: null, error: error.message };
+    }
+  }
+
+  async ps() {
+    try {
+      return (await upstreamJson(this.upstreamConfig, '/api/ps', { timeoutMs: 10000 })).body;
+    } catch (error) {
+      return { error: error.message, models: [] };
+    }
+  }
+
+  async show(model) {
+    return await upstreamJson(this.upstreamConfig, '/api/show', {
+      method: 'POST',
+      body: { model },
+      timeoutMs: Math.min(this.config.upstreamTimeoutMs, 10000)
+    });
+  }
+
+  async prepareProxy({ method, pathname, body, query }) {
+    return {
+      upstreamPath: `${pathname}${query || ''}`,
+      upstreamBody: body,
+      responseKind: 'passthrough',
+      streaming: body?.stream !== false,
+      method
+    };
+  }
+
+  prepareResponses(translated) {
+    return { path: '/api/chat', body: translated.upstreamBody, responseKind: 'ollama' };
+  }
+
+  async adaptResponsesResponse(response) {
+    return response;
+  }
+}
+
+export class OllamaBackendAdapter extends BackendAdapter {
+  get kind() {
+    return OLLAMA_KIND;
+  }
+}
+
+export class LlamaCppBackendAdapter extends BackendAdapter {
+  get kind() {
+    return LLAMA_CPP_KIND;
+  }
+
+  get upstreamConfig() {
+    return clonedConfig(this.config, this.activeModel.backend_url || this.config.llamaCppUpstreamUrl);
+  }
+
+  get maxActiveRequests() {
+    return positiveInteger(this.activeModel.max_active_requests, 2);
+  }
+
+  async health() {
+    const started = Date.now();
+    try {
+      const health = await upstreamJson(this.upstreamConfig, '/health', { timeoutMs: 5000 });
+      return {
+        ok: health.ok && health.body?.status === 'ok',
+        status: health.status,
+        latencyMs: Date.now() - started,
+        backendKind: this.kind,
+        version: { revision: this.activeModel.backend_revision || null },
+        error: health.ok ? null : health.text
+      };
+    } catch (error) {
+      return { ok: false, status: null, latencyMs: Date.now() - started, backendKind: this.kind, version: null, error: error.message };
+    }
+  }
+
+  async ps() {
+    try {
+      const [models, slots] = await Promise.all([
+        upstreamJson(this.upstreamConfig, '/v1/models', { timeoutMs: 10000 }),
+        upstreamJson(this.upstreamConfig, '/slots', { timeoutMs: 10000 })
+      ]);
+      const model = models.body?.data?.find((entry) => entry?.id === this.activeModel.model) || models.body?.data?.[0];
+      return {
+        models: model ? [{
+          name: this.activeModel.model,
+          model: this.activeModel.model,
+          context_length: this.activeModel.context_length,
+          total_context_length: this.activeModel.total_context_length,
+          slots: Array.isArray(slots.body) ? slots.body.length : null,
+          expires_at: '9999-12-31T23:59:59Z'
+        }] : []
+      };
+    } catch (error) {
+      return { error: error.message, models: [] };
+    }
+  }
+
+  async show() {
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        model: this.activeModel.model,
+        capabilities: ['completion', ...(this.activeModel.reasoning_policy ? ['thinking'] : [])],
+        details: { backend: 'llama_cpp' },
+        model_info: { context_length: this.activeModel.context_length }
+      },
+      text: ''
+    };
+  }
+
+  async validateContext(messages, outputTokens, templateControls = {}) {
+    const slotContext = positiveInteger(this.activeModel.context_length, 131072);
+    const reserve = positiveInteger(this.activeModel.context_safety_reserve, 1024);
+    let applied;
+    try {
+      applied = await upstreamJson(this.upstreamConfig, '/apply-template', {
+        method: 'POST',
+        body: {
+          messages,
+          ...(templateControls.chat_template_kwargs ? { chat_template_kwargs: templateControls.chat_template_kwargs } : {}),
+          ...(templateControls.reasoning_effort ? { reasoning_effort: templateControls.reasoning_effort } : {})
+        },
+        timeoutMs: Math.min(this.config.upstreamTimeoutMs, 120000)
+      });
+    } catch (error) {
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The active backend could not apply its chat template: ${error.message}`);
+    }
+    const prompt = applied.body?.prompt;
+    if (!applied.ok || typeof prompt !== 'string') {
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', 'The active backend did not return a valid formatted prompt.');
+    }
+    let tokenized;
+    try {
+      tokenized = await upstreamJson(this.upstreamConfig, '/tokenize', {
+        method: 'POST',
+        body: { content: prompt, add_special: false },
+        timeoutMs: Math.min(this.config.upstreamTimeoutMs, 300000)
+      });
+    } catch (error) {
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The active backend could not tokenize the formatted prompt: ${error.message}`);
+    }
+    const inputTokens = Array.isArray(tokenized.body?.tokens) ? tokenized.body.tokens.length : null;
+    if (!tokenized.ok || inputTokens === null) {
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', 'The active backend did not return a valid token array.');
+    }
+    if (inputTokens + outputTokens + reserve > slotContext) {
+      throw new BackendAdapterError(
+        400,
+        'CONTEXT_LIMIT_EXCEEDED',
+        `Formatted input (${inputTokens}) plus requested output (${outputTokens}) and safety reserve (${reserve}) exceeds the ${slotContext}-token slot.`,
+        'messages'
+      );
+    }
+    return { inputTokens, outputTokens, reserve, slotContext };
+  }
+
+  async prepareProxy({ method, pathname, body }) {
+    if (['/api/embed', '/api/embeddings'].includes(pathname)) {
+      throw new BackendAdapterError(400, 'UNSUPPORTED_PROFILE_CAPABILITY', 'Embeddings are not enabled for the active model profile.');
+    }
+
+    if (requestIsStatus(method, pathname)) {
+      return { localResponse: await this.statusResponse(method, pathname, body) };
+    }
+
+    let messages;
+    let responseKind;
+    let protocol;
+    if (pathname === '/v1/chat/completions') {
+      messages = body?.messages;
+      responseKind = 'openai-chat';
+      protocol = 'openai-chat';
+    } else if (pathname === '/api/chat') {
+      messages = body?.messages;
+      responseKind = 'native-chat';
+      protocol = 'native-chat';
+    } else if (pathname === '/api/generate') {
+      messages = [{ role: 'user', content: typeof body?.prompt === 'string' ? body.prompt : '' }];
+      responseKind = 'native-generate';
+      protocol = 'native-generate';
+    } else {
+      throw new BackendAdapterError(404, 'ROUTE_NOT_SUPPORTED_BY_BACKEND', 'The selected backend does not support this route.');
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+      throw new BackendAdapterError(400, 'INVALID_MESSAGES', 'At least one chat message is required.', 'messages');
+    }
+    const reasoning = normalizeLlamaReasoningRequest(body, this.activeModel, protocol);
+    const outputTokens = reasoning.outputTokens;
+    const context = await this.validateContext(messages, outputTokens, reasoning.controls);
+    const temperature = Number(body?.temperature ?? body?.options?.temperature ?? 0);
+    const upstreamBody = {
+      model: this.activeModel.model,
+      messages: messagesForLlama(messages, protocol),
+      stream: body?.stream !== false,
+      temperature: Number.isFinite(temperature) ? temperature : 0,
+      max_tokens: outputTokens,
+      ...reasoning.controls,
+      ...(body?.seed === undefined ? {} : { seed: body.seed }),
+      ...(body?.stop === undefined ? {} : { stop: body.stop }),
+      ...(body?.top_p === undefined && body?.options?.top_p === undefined ? {} : { top_p: body?.top_p ?? body?.options?.top_p })
+    };
+    return {
+      upstreamPath: '/v1/chat/completions',
+      upstreamBody,
+      responseKind,
+      streaming: upstreamBody.stream,
+      method: 'POST',
+      context,
+      reasoning
+    };
+  }
+
+  async statusResponse(method, pathname) {
+    if (method === 'GET' && pathname === '/api/version') {
+      return { status: 200, body: { version: `llama.cpp-${this.activeModel.backend_revision || 'pinned'}` } };
+    }
+    if (method === 'GET' && pathname === '/api/tags') {
+      return { status: 200, body: { models: [{ name: this.activeModel.model, model: this.activeModel.model }] } };
+    }
+    if (method === 'GET' && pathname === '/api/ps') {
+      return { status: 200, body: await this.ps() };
+    }
+    if (method === 'POST' && pathname === '/api/show') {
+      return { status: 200, body: (await this.show()).body };
+    }
+    throw new BackendAdapterError(404, 'ROUTE_NOT_SUPPORTED_BY_BACKEND', 'The selected backend does not support this status route.');
+  }
+
+  prepareResponses(translated) {
+    const reasoning = normalizeLlamaReasoningRequest(translated.originalBody || {}, this.activeModel, 'responses');
+    const outputTokens = reasoning.outputTokens;
+    const body = {
+      model: this.activeModel.model,
+      messages: messagesForLlama(translated.upstreamBody.messages, 'responses'),
+      stream: translated.stream,
+      temperature: translated.upstreamBody?.options?.temperature ?? 0,
+      max_tokens: outputTokens,
+      ...reasoning.controls
+    };
+    return { path: '/v1/chat/completions', body, responseKind: 'openai', outputTokens, reasoning };
+  }
+
+  async validateResponsesContext(prepared) {
+    return await this.validateContext(prepared.body.messages, prepared.outputTokens, prepared.reasoning?.controls);
+  }
+
+  async adaptResponsesResponse(response, streaming) {
+    if (!response.ok) return response;
+    if (!streaming) {
+      const payload = JSON.parse(await response.text());
+      const ollama = openAiCompletionToOllama(payload, { kind: 'native-chat', model: this.activeModel.model });
+      return new Response(JSON.stringify(ollama), {
+        status: response.status,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return new Response(openAiSseToOllamaStream(response.body, {
+      kind: 'native-chat',
+      model: this.activeModel.model
+    }), {
+      status: response.status,
+      headers: { 'content-type': 'application/x-ndjson' }
+    });
+  }
+}
+
+function requestIsStatus(method, pathname) {
+  return (method === 'GET' && ['/api/version', '/api/tags', '/api/ps'].includes(pathname))
+    || (method === 'POST' && pathname === '/api/show');
+}
+
+export function resolveBackendAdapter(config, activeModel) {
+  const kind = activeModel?.backend_kind || OLLAMA_KIND;
+  if (kind === OLLAMA_KIND) return new OllamaBackendAdapter(config, activeModel);
+  if (kind === LLAMA_CPP_KIND) return new LlamaCppBackendAdapter(config, activeModel);
+  throw new BackendAdapterError(503, 'INVALID_BACKEND_KIND', `Unsupported active backend kind: ${kind}.`);
+}
+
+export function isGenerationPath(pathname) {
+  return ['/api/chat', '/api/generate', '/v1/chat/completions', '/v1/responses', '/responses'].includes(pathname);
+}
+
+export function openAiNonstreamForPublic(payload, model) {
+  return { ...payload, model };
+}
+
+export async function fetchPrepared(adapter, prepared, headers = {}, signal = undefined) {
+  const method = prepared.method || 'POST';
+  const payload = prepared.upstreamBody ?? prepared.body;
+  return await upstreamFetch(adapter.upstreamConfig, prepared.upstreamPath || prepared.path, {
+    method,
+    headers,
+    body: ['GET', 'HEAD'].includes(String(method).toUpperCase()) || payload === undefined || payload === null
+      ? undefined
+      : JSON.stringify(payload),
+    signal
+  });
+}

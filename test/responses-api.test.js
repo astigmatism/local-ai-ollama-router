@@ -341,6 +341,18 @@ function parseSse(text) {
     .map((block) => JSON.parse(block.slice(6)));
 }
 
+async function beforeTimeout(promise, timeoutMs = 1000) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => { timeout = setTimeout(() => resolve({ timedOut: true }), timeoutMs); })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 test('request translation preserves instructions, message roles, images, JSON format, reasoning, and limits', () => {
   const translated = translateResponsesRequest({
     model: 'active:model',
@@ -1504,17 +1516,34 @@ test('streaming response headers and lifecycle begin before Ollama response head
   const fixture = await makeFixture();
   try {
     const pendingResponse = postResponses(fixture, { input: 'delayed-headers', stream: true });
-    const earlyResult = await Promise.race([
-      pendingResponse.then((response) => ({ response })),
-      new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 100))
-    ]);
-    fixture.upstream.state.releaseDelayedHeaders();
-
+    const earlyResult = await beforeTimeout(pendingResponse.then((response) => ({ response })));
     assert.equal(earlyResult.timedOut, undefined, 'router waited for Ollama before starting SSE');
     assert.equal(earlyResult.response.status, 200);
     assert.match(earlyResult.response.headers.get('content-type') || '', /text\/event-stream/);
-    const events = parseSse(await earlyResult.response.text());
-    assert.equal(events[0].type, 'response.created');
+
+    const reader = earlyResult.response.body.getReader();
+    let raw = '';
+    const firstEventResult = await beforeTimeout(
+      (async () => {
+        while (!parseSse(raw).length) {
+          const { done, value } = await reader.read();
+          assert.equal(done, false, 'SSE ended before response.created');
+          raw += Buffer.from(value).toString('utf8');
+        }
+        return { event: parseSse(raw)[0] };
+      })()
+    );
+    assert.equal(firstEventResult.timedOut, undefined, 'router did not emit SSE before Ollama responded');
+    assert.equal(firstEventResult.event.type, 'response.created');
+
+    fixture.upstream.state.releaseDelayedHeaders();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      raw += Buffer.from(value).toString('utf8');
+    }
+    assert.match(raw, /data: \[DONE\]/);
+    const events = parseSse(raw);
     assert.equal(events.at(-1).type, 'response.completed');
   } finally {
     fixture.upstream.state.releaseDelayedHeaders();

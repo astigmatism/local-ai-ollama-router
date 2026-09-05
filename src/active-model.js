@@ -59,7 +59,33 @@ function markerMetadata(parsed) {
     metadata_warnings: warnings,
     revision: typeof parsed.revision === 'string' || typeof parsed.revision === 'number'
       ? String(parsed.revision)
-      : null
+      : null,
+    backend_kind: typeof parsed.backend_kind === 'string' && parsed.backend_kind.trim()
+      ? parsed.backend_kind.trim().toLowerCase()
+      : 'ollama',
+    backend_url: typeof parsed.backend_url === 'string' && parsed.backend_url.trim()
+      ? parsed.backend_url.trim().replace(/\/+$/, '')
+      : null,
+    backend_revision: typeof parsed.backend_revision === 'string' ? parsed.backend_revision.trim() || null : null,
+    total_context_length: positiveInteger(parsed.total_context_length),
+    max_active_requests: positiveInteger(parsed.max_active_requests),
+    default_output_tokens: positiveInteger(parsed.default_output_tokens),
+    context_safety_reserve: positiveInteger(parsed.context_safety_reserve),
+    gpu_uuids: Array.isArray(parsed.gpu_uuids)
+      ? parsed.gpu_uuids.filter((value) => typeof value === 'string' && value.startsWith('GPU-'))
+      : null,
+    fit_target: typeof parsed.fit_target === 'string' ? parsed.fit_target.trim() || null : null,
+    model_path: typeof parsed.model_path === 'string' ? parsed.model_path.trim() || null : null,
+    prompt_cache_mode: typeof parsed.prompt_cache_mode === 'string' ? parsed.prompt_cache_mode.trim() || null : null,
+    reasoning_policy: parsed.reasoning_policy && typeof parsed.reasoning_policy === 'object' && !Array.isArray(parsed.reasoning_policy)
+      ? parsed.reasoning_policy
+      : null,
+    capability_profile: parsed.capability_profile && typeof parsed.capability_profile === 'object' && !Array.isArray(parsed.capability_profile)
+      ? parsed.capability_profile
+      : null,
+    deployment_warnings: Array.isArray(parsed.deployment_warnings)
+      ? parsed.deployment_warnings.filter((value) => typeof value === 'string' && value.trim())
+      : []
   };
 }
 
@@ -69,7 +95,21 @@ function emptyMarkerMetadata() {
     max_output_tokens: null,
     input_modalities: null,
     metadata_warnings: [],
-    revision: null
+    revision: null,
+    backend_kind: 'ollama',
+    backend_url: null,
+    backend_revision: null,
+    total_context_length: null,
+    max_active_requests: null,
+    default_output_tokens: null,
+    context_safety_reserve: null,
+    gpu_uuids: null,
+    fit_target: null,
+    model_path: null,
+    prompt_cache_mode: null,
+    reasoning_policy: null,
+    capability_profile: null,
+    deployment_warnings: []
   };
 }
 
@@ -216,6 +256,20 @@ export async function writeActiveModelMarker(filePath, marker) {
     ...(marker.max_output_tokens === undefined ? {} : { max_output_tokens: marker.max_output_tokens }),
     ...(marker.input_modalities === undefined ? {} : { input_modalities: marker.input_modalities }),
     ...(marker.revision === undefined ? {} : { revision: marker.revision }),
+    ...(marker.backend_kind === undefined ? {} : { backend_kind: marker.backend_kind }),
+    ...(marker.backend_url === undefined ? {} : { backend_url: marker.backend_url }),
+    ...(marker.backend_revision === undefined ? {} : { backend_revision: marker.backend_revision }),
+    ...(marker.total_context_length === undefined ? {} : { total_context_length: marker.total_context_length }),
+    ...(marker.max_active_requests === undefined ? {} : { max_active_requests: marker.max_active_requests }),
+    ...(marker.default_output_tokens === undefined ? {} : { default_output_tokens: marker.default_output_tokens }),
+    ...(marker.context_safety_reserve === undefined ? {} : { context_safety_reserve: marker.context_safety_reserve }),
+    ...(marker.gpu_uuids === undefined ? {} : { gpu_uuids: marker.gpu_uuids }),
+    ...(marker.fit_target === undefined ? {} : { fit_target: marker.fit_target }),
+    ...(marker.model_path === undefined ? {} : { model_path: marker.model_path }),
+    ...(marker.prompt_cache_mode === undefined ? {} : { prompt_cache_mode: marker.prompt_cache_mode }),
+    ...(marker.reasoning_policy === undefined ? {} : { reasoning_policy: marker.reasoning_policy }),
+    ...(marker.capability_profile === undefined ? {} : { capability_profile: marker.capability_profile }),
+    ...(marker.deployment_warnings === undefined ? {} : { deployment_warnings: marker.deployment_warnings }),
     updated_at: marker.updated_at ?? new Date().toISOString(),
     source: marker.source ?? 'local-ai-ollama-router'
   };

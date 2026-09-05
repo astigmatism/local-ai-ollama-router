@@ -23,6 +23,17 @@ import {
 import { resolveDefaultThink, thinkLevelToReasoningEffort } from './reasoning.js';
 import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
 import {
+  BackendAdapterError,
+  fetchPrepared,
+  isGenerationPath,
+  normalizeOpenAiSseModel,
+  openAiCompletionToOllama,
+  openAiNonstreamForPublic,
+  openAiSseToOllamaStream,
+  resolveBackendAdapter
+} from './backend-adapters.js';
+import { RequestGate, RequestGateError } from './request-gate.js';
+import {
   ActiveModelDiscovery,
   ifNoneMatchMatches,
   ModelDiscoveryError,
@@ -50,6 +61,22 @@ const PUBLIC_ROOT = path.resolve(__dirname, '..', 'public');
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function combineAbortSignals(signals) {
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any(signals);
+  const controller = new AbortController();
+  const abort = (signal) => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  for (const signal of signals) {
+    if (signal.aborted) {
+      abort(signal);
+      break;
+    }
+    signal.addEventListener('abort', () => abort(signal), { once: true });
+  }
+  return controller.signal;
 }
 
 function createBaseRecord(request, pathname) {
@@ -93,16 +120,22 @@ function errorPayload(code, message, details = undefined) {
 }
 
 async function handleHealth(response, context) {
-  const [activeModel, upstream] = await Promise.all([
-    readActiveModel(context.config),
-    checkUpstream(context.config)
-  ]);
-  sendJson(response, upstream.ok ? 200 : 503, {
-    ok: upstream.ok,
+  const activeModel = await readActiveModel(context.config);
+  const upstream = await resolveBackendAdapter(context.config, activeModel).health();
+  const runtime = context.requestGate.snapshot(activeModel);
+  // During a controlled transition the router is intentionally available while
+  // its previous backend is offline. Keep the service health check green so the
+  // transaction can commit the replacement backend; generation routes still
+  // return the explicit BACKEND_DRAINING 503 enforced by the request gate.
+  const serviceAvailable = upstream.ok || runtime.draining;
+  sendJson(response, serviceAvailable ? 200 : 503, {
+    ok: serviceAvailable,
+    backend_ready: upstream.ok,
     router: {
       appName: context.config.appName,
       version: context.config.version,
       maintenanceMode: context.state.maintenanceMode,
+      runtime,
       startedAt: context.state.startedAt
     },
     upstream,
@@ -199,10 +232,11 @@ async function handleModelDiscovery(request, response, pathname, context) {
 }
 
 async function buildSummary(context) {
-  const [activeModel, upstream, ps, gpu] = await Promise.all([
-    readActiveModel(context.config),
-    checkUpstream(context.config),
-    getOllamaPs(context.config),
+  const activeModel = await readActiveModel(context.config);
+  const backend = resolveBackendAdapter(context.config, activeModel);
+  const [upstream, ps, gpu] = await Promise.all([
+    backend.health(),
+    backend.ps(),
     getGpuTelemetry(context.config)
   ]);
   const activeLoadedState = activeModel.model ? activeModelLoadedState(ps, activeModel.model) : { loaded: false, until: null, raw: null };
@@ -220,6 +254,7 @@ async function buildSummary(context) {
       version: context.config.version,
       startedAt: context.state.startedAt,
       maintenanceMode: context.state.maintenanceMode,
+      runtime: context.requestGate.snapshot(activeModel),
       uptimeSeconds: Math.round(process.uptime()),
       api: {
         host: context.config.host,
@@ -247,6 +282,69 @@ async function buildSummary(context) {
 
 async function handleAdminApi(request, response, pathname, context, { requireAuth = true } = {}) {
   if (requireAuth && !requireAdmin(request, response, context.config)) return;
+
+  if (['/admin/api/runtime-state', '/admin/api/runtime-drain'].includes(pathname)) {
+    if (!context.config.adminToken) {
+      sendJson(response, 503, errorPayload('RUNTIME_CONTROL_UNAVAILABLE', 'Runtime control requires a configured admin token.'));
+      return;
+    }
+    if (!requireAdmin(request, response, context.config)) return;
+  }
+
+  if (request.method === 'GET' && pathname === '/admin/api/runtime-state') {
+    const activeModel = await readActiveModel(context.config);
+    const backend = resolveBackendAdapter(context.config, activeModel);
+    const health = await backend.health();
+    const ps = await backend.ps();
+    sendJson(response, 200, {
+      ok: true,
+      runtime: context.requestGate.snapshot(activeModel),
+      backend: { kind: backend.kind, health, status: ps },
+      active_model: {
+        profile: activeModel.profile,
+        model: activeModel.model,
+        backend_kind: activeModel.backend_kind,
+        context_length: activeModel.context_length,
+        total_context_length: activeModel.total_context_length,
+        max_active_requests: activeModel.max_active_requests,
+        gpu_uuids: activeModel.gpu_uuids,
+        fit_target: activeModel.fit_target,
+        prompt_cache_mode: activeModel.prompt_cache_mode,
+        prompt_cache_volatile: activeModel.capability_profile?.prompt_cache_volatile === true,
+        prompt_cache_persistence: activeModel.capability_profile?.prompt_cache_persistence === true,
+        reasoning_default: activeModel.reasoning_policy?.default_level ?? null,
+        reasoning_levels: Object.keys(activeModel.reasoning_policy?.levels || {}),
+        reasoning_aliases: activeModel.reasoning_policy?.aliases ?? {}
+      }
+    });
+    return;
+  }
+
+  if (request.method === 'POST' && pathname === '/admin/api/runtime-drain') {
+    let body;
+    try {
+      body = parseJsonBuffer(await readRequestBody(request, context.config.maxBodyBytes)) || {};
+    } catch (error) {
+      sendJson(response, error.statusCode || 400, errorPayload('INVALID_JSON_BODY', error.message));
+      return;
+    }
+    if (typeof body.enabled !== 'boolean') {
+      sendJson(response, 400, errorPayload('INVALID_DRAIN_STATE', 'enabled must be a boolean.'));
+      return;
+    }
+    const activeModel = await readActiveModel(context.config);
+    const runtime = await context.requestGate.setDraining(body.enabled, body.reason);
+    await persistEvent(context.store, {
+      type: 'runtime_drain_changed',
+      enabled: body.enabled,
+      reason: runtime.drain_reason,
+      profile: activeModel.profile,
+      backendKind: activeModel.backend_kind,
+      activeCount: runtime.active_count
+    });
+    sendJson(response, 200, { ok: true, runtime: context.requestGate.snapshot(activeModel) });
+    return;
+  }
 
   if (request.method === 'GET' && pathname === '/admin/api/summary') {
     sendJson(response, 200, await buildSummary(context));
@@ -305,6 +403,18 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
       sendJson(response, 503, errorPayload('NO_ACTIVE_MODEL', 'Cannot prewarm because no active model marker is available.'));
       return;
     }
+    const backend = resolveBackendAdapter(context.config, activeModel);
+    if (backend.kind === 'llama_cpp') {
+      const health = await backend.health();
+      await persistEvent(context.store, {
+        type: 'prewarm_checked',
+        model: activeModel.model,
+        backendKind: backend.kind,
+        ok: health.ok
+      });
+      sendJson(response, health.ok ? 200 : 503, { ok: health.ok, model: activeModel.model, backend: backend.kind, health });
+      return;
+    }
     const body = {
       model: activeModel.model,
       prompt: '',
@@ -313,7 +423,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
     };
     const started = Date.now();
     try {
-      const result = await upstreamJson(context.config, '/api/generate', { method: 'POST', body, timeoutMs: context.config.upstreamTimeoutMs });
+      const result = await upstreamJson(backend.upstreamConfig, '/api/generate', { method: 'POST', body, timeoutMs: context.config.upstreamTimeoutMs });
       await persistEvent(context.store, {
         type: 'prewarm_triggered',
         model: activeModel.model,
@@ -349,17 +459,38 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
     }
     const prompt = typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt : 'Reply with a one sentence health check.';
     const started = Date.now();
+    const backend = resolveBackendAdapter(context.config, activeModel);
+    let lease = null;
     try {
-      const result = await upstreamJson(context.config, '/api/chat', {
-        method: 'POST',
-        timeoutMs: context.config.upstreamTimeoutMs,
-        body: {
-          model: activeModel.model,
-          messages: [{ role: 'user', content: prompt }],
-          stream: false,
-          keep_alive: context.config.forcedKeepAlive
-        }
-      });
+      let result;
+      if (backend.kind === 'llama_cpp') {
+        const prepared = await backend.prepareProxy({
+          method: 'POST',
+          pathname: '/api/chat',
+          body: { model: activeModel.model, messages: [{ role: 'user', content: prompt }], stream: false },
+          query: ''
+        });
+        lease = context.requestGate.acquire({ endpoint: '/admin/api/test-chat', clientIdentity: 'admin', limit: backend.maxActiveRequests });
+        const upstream = await fetchPrepared(backend, prepared, { 'content-type': 'application/json', accept: 'application/json' });
+        const payload = JSON.parse(await upstream.text());
+        result = {
+          ok: upstream.ok,
+          status: upstream.status,
+          body: upstream.ok ? openAiCompletionToOllama(payload, { kind: 'native-chat', model: activeModel.model }) : payload,
+          usage: upstream.ok ? payload.usage : null
+        };
+      } else {
+        result = await upstreamJson(backend.upstreamConfig, '/api/chat', {
+          method: 'POST',
+          timeoutMs: context.config.upstreamTimeoutMs,
+          body: {
+            model: activeModel.model,
+            messages: [{ role: 'user', content: prompt }],
+            stream: false,
+            keep_alive: context.config.forcedKeepAlive
+          }
+        });
+      }
       await persistEvent(context.store, {
         type: 'admin_test_chat',
         model: activeModel.model,
@@ -377,6 +508,8 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
     } catch (error) {
       await persistEvent(context.store, { type: 'admin_test_chat_failed', model: activeModel.model, error: error.message });
       sendJson(response, 502, errorPayload('UPSTREAM_ERROR', error.message));
+    } finally {
+      lease?.release();
     }
     return;
   }
@@ -446,9 +579,28 @@ async function handleProxy(request, response, url, context) {
     : context.config.promptLogging;
 
   const activeModel = await readActiveModel(context.config);
+  let backend;
+  try {
+    backend = resolveBackendAdapter(context.config, activeModel);
+  } catch (error) {
+    await rejectProxyRequest(response, context, recordBase, error.statusCode || 503, error.code || 'INVALID_BACKEND_KIND', error.message, {
+      activeModel: activeModel.model,
+      requestedModel: incomingBody?.model || null,
+      bodySummary: summarizeBody(incomingBody, bodySummaryMode)
+    });
+    return;
+  }
   const isModelBodyRoute = MODEL_BODY_ROUTES.has(routeKey(request.method, pathname));
-  if (context.state.maintenanceMode && isModelBodyRoute) {
-    await rejectProxyRequest(response, context, recordBase, 503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.', {
+  if ((context.state.maintenanceMode || context.requestGate.draining) && isModelBodyRoute) {
+    const drainBlocked = context.requestGate.draining;
+    await rejectProxyRequest(
+      response,
+      context,
+      recordBase,
+      503,
+      drainBlocked ? 'BACKEND_DRAINING' : 'MAINTENANCE_MODE',
+      drainBlocked ? 'The active inference backend is draining for a runtime transition. Retry shortly.' : 'Router maintenance mode is enabled.',
+      {
       activeModel: activeModel.model,
       requestedModel: incomingBody?.model || null,
       bodySummary: summarizeBody(incomingBody, bodySummaryMode),
@@ -459,7 +611,8 @@ async function handleProxy(request, response, url, context) {
       toolsSupported: incomingToolPolicy.toolsSupported,
       toolsDropped: incomingToolPolicy.toolsDropped,
       unsupportedToolsPolicy: incomingToolPolicy.unsupportedToolsPolicy
-    });
+      }
+    );
     return;
   }
 
@@ -539,14 +692,14 @@ async function handleProxy(request, response, url, context) {
       && typeof bodyWithThinkDefault === 'object'
       && !Array.isArray(bodyWithThinkDefault)
       && !Object.hasOwn(bodyWithThinkDefault, 'think');
-    const capabilityLookup = createModelCapabilityLookup(context.config, policy.forwardedModel);
+    const capabilityLookup = createModelCapabilityLookup(backend.upstreamConfig, policy.forwardedModel);
     try {
-      if (canApplyThinkDefault) {
+      if (backend.kind === 'ollama' && canApplyThinkDefault) {
         let defaultThink;
         defaultThink = resolveDefaultThink(activeModel, context.config);
         if (defaultThink !== undefined) bodyWithThinkDefault = { ...bodyWithThinkDefault, think: defaultThink };
       }
-      if (normalizesTools) {
+      if (backend.kind === 'ollama' && normalizesTools) {
         toolPolicy = await normalizeToolsForModel(
           bodyWithThinkDefault,
           policy.forwardedModel,
@@ -556,9 +709,9 @@ async function handleProxy(request, response, url, context) {
       } else {
         toolPolicy = emptyToolPolicy(bodyWithThinkDefault, context.config.unsupportedToolsPolicy);
       }
-      if (normalizesThinking) {
+      if (backend.kind === 'ollama' && normalizesThinking) {
         thinkPolicy = await normalizeThinkForModel(
-          context.config,
+          backend.upstreamConfig,
           policy.forwardedModel,
           toolPolicy.body,
           policy.forwardedModel === activeModel.model ? activeModel : null,
@@ -697,98 +850,239 @@ async function handleProxy(request, response, url, context) {
     });
   }
 
-  const upstreamPath = `${pathname}${url.search || ''}`;
   const started = Date.now();
-  let upstreamResponse;
-  try {
-    const hasBody = methodAllowsBody(request.method) && sanitizedBody !== null;
-    upstreamResponse = await upstreamFetch(context.config, upstreamPath, {
-      method: request.method,
-      headers: filterRequestHeaders(
-        request.headers,
-        hasBody ? { 'content-type': 'application/json' } : {}
-      ),
-      body: hasBody ? JSON.stringify(sanitizedBody) : undefined
-    });
-  } catch (error) {
-    const status = error.name === 'AbortError' ? 504 : 502;
-    const finalRecord = {
-      ...commonRecord,
-      allowed: true,
-      rejected: false,
-      responseStatus: status,
-      status,
-      upstreamError: true,
-      errorSummary: error.message,
-      latencyMs: Date.now() - started
-    };
-    await persistRequest(context.store, context.metrics, finalRecord);
-    await persistEvent(context.store, { type: 'upstream_request_failed', endpoint: pathname, error: error.message });
-    sendJson(response, status, errorPayload('UPSTREAM_REQUEST_FAILED', error.message));
-    return;
-  }
-
-  const streaming = commonRecord.streaming && upstreamResponse.body;
+  let prepared;
+  let lease = null;
+  let upstreamResponse = null;
+  let finalStatus = 500;
   let usage = null;
   let responseBytes = 0;
   let parseErrors = 0;
+  let requestPersisted = false;
+  const clientController = new AbortController();
+  const abortForClient = () => {
+    if (!response.writableEnded && !clientController.signal.aborted) clientController.abort(new Error('Client disconnected.'));
+  };
+  request.once('aborted', abortForClient);
+  response.once('close', abortForClient);
 
   try {
-    if (streaming) {
-      const collector = new NdjsonUsageCollector();
-      copyUpstreamHeaders(upstreamResponse.headers, response, true);
-      response.writeHead(upstreamResponse.status);
-      const reader = upstreamResponse.body.getReader();
+    if (isGenerationPath(pathname)) {
+      try {
+        // Acquire before backend-side template/token validation. A switch that
+        // begins during validation must wait for this accepted request instead
+        // of stopping its backend underneath it.
+        lease = context.requestGate.acquire({
+          endpoint: pathname,
+          clientIdentity: commonRecord.clientIdentity,
+          limit: backend.maxActiveRequests
+        });
+      } catch (error) {
+        if (error instanceof RequestGateError) {
+          await rejectProxyRequest(response, context, commonRecord, error.statusCode, error.code, error.message, commonRecord);
+          requestPersisted = true;
+          return;
+        }
+        throw error;
+      }
+    }
+
+    try {
+      prepared = await backend.prepareProxy({
+        method: request.method,
+        pathname,
+        body: sanitizedBody,
+        query: url.search || ''
+      });
+      if (backend.kind === 'llama_cpp' && prepared.reasoning) {
+        Object.assign(commonRecord, {
+          reasoningEffort: prepared.reasoning.level,
+          thinkingSupported: true,
+          requestedOutputTokens: prepared.reasoning.requestedOutputTokens,
+          effectiveOutputTokens: prepared.reasoning.outputTokens,
+          outputLimitCapped: prepared.reasoning.outputLimitCapped,
+          outputLimitPolicy: prepared.reasoning.outputLimitPolicy
+        });
+        if (prepared.reasoning.outputLimitCapped) {
+          await persistEvent(context.store, {
+            type: 'output_limit_capped',
+            endpoint: pathname,
+            method: request.method,
+            model: policy.forwardedModel,
+            reasoningEffort: prepared.reasoning.level,
+            requestedOutputTokens: prepared.reasoning.requestedOutputTokens,
+            effectiveOutputTokens: prepared.reasoning.outputTokens,
+            clientIdentity: commonRecord.clientIdentity,
+            sourceIp: commonRecord.sourceIp
+          });
+        }
+      }
+    } catch (error) {
+      if (error instanceof BackendAdapterError) {
+        await rejectProxyRequest(response, context, commonRecord, error.statusCode, error.code, error.message, commonRecord);
+        requestPersisted = true;
+        return;
+      }
+      throw error;
+    }
+
+    if (prepared.localResponse) {
+      finalStatus = prepared.localResponse.status;
+      const payload = prepared.localResponse.body;
+      responseBytes = Buffer.byteLength(`${JSON.stringify(payload, null, 2)}\n`);
+      sendJson(response, finalStatus, payload, { 'x-ollama-router': 'local-ai-ollama-router' });
+      await persistRequest(context.store, context.metrics, {
+        ...commonRecord,
+        allowed: true,
+        rejected: false,
+        responseStatus: finalStatus,
+        status: finalStatus,
+        upstreamError: false,
+        latencyMs: Date.now() - started,
+        responseBytes,
+        usage,
+        streamParseErrors: parseErrors,
+        backendKind: backend.kind
+      });
+      requestPersisted = true;
+      return;
+    }
+
+    const timeoutSignal = AbortSignal.timeout(context.config.upstreamTimeoutMs);
+    const signal = combineAbortSignals([clientController.signal, timeoutSignal]);
+    const hasBody = methodAllowsBody(prepared.method || request.method) && (prepared.upstreamBody ?? sanitizedBody) !== null;
+    upstreamResponse = await fetchPrepared(
+      backend,
+      prepared,
+      filterRequestHeaders(request.headers, hasBody ? {
+        'content-type': 'application/json',
+        accept: prepared.streaming ? (prepared.responseKind === 'passthrough' ? (request.headers.accept || '*/*') : 'text/event-stream') : 'application/json'
+      } : {}),
+      signal
+    );
+    finalStatus = upstreamResponse.status;
+
+    if (backend.kind === 'llama_cpp' && !upstreamResponse.ok) {
+      const text = await upstreamResponse.text();
+      let details = null;
+      try { details = JSON.parse(text); } catch { details = null; }
+      finalStatus = upstreamResponse.status >= 500 ? 502 : upstreamResponse.status;
+      sendJson(response, finalStatus, errorPayload('BACKEND_REQUEST_FAILED', details?.error?.message || details?.error || 'The active llama.cpp backend rejected the request.'));
+      responseBytes = Buffer.byteLength(text);
+      return;
+    }
+
+    let streamingBody = upstreamResponse.body;
+    let contentType = upstreamResponse.headers.get('content-type') || '';
+    if (prepared.streaming && backend.kind === 'llama_cpp') {
+      if (prepared.responseKind === 'openai-chat') {
+        streamingBody = normalizeOpenAiSseModel(upstreamResponse.body, activeModel.model);
+        contentType = 'text/event-stream; charset=utf-8';
+      } else {
+        streamingBody = openAiSseToOllamaStream(upstreamResponse.body, {
+          kind: prepared.responseKind,
+          model: activeModel.model
+        });
+        contentType = 'application/x-ndjson; charset=utf-8';
+      }
+    }
+
+    if (prepared.streaming && streamingBody) {
+      const collector = prepared.responseKind === 'openai-chat' ? null : new NdjsonUsageCollector();
+      response.setHeader('content-type', contentType);
+      response.setHeader('cache-control', 'no-store');
+      response.setHeader('x-ollama-router', 'local-ai-ollama-router');
+      if (prepared.reasoning?.outputLimitCapped) {
+        response.setHeader('x-router-effective-max-output-tokens', String(prepared.reasoning.outputTokens));
+      }
+      response.writeHead(finalStatus);
+      const reader = streamingBody.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         const buffer = Buffer.from(value);
         responseBytes += buffer.length;
-        collector.observe(buffer);
+        collector?.observe(buffer);
         if (!response.write(buffer)) await once(response, 'drain');
       }
-      const collected = collector.finish();
-      usage = collected.usage;
-      parseErrors = collected.parseErrors;
+      if (collector) {
+        const collected = collector.finish();
+        usage = collected.usage;
+        parseErrors = collected.parseErrors;
+      }
       response.end();
     } else {
-      const arrayBuffer = await upstreamResponse.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      responseBytes = buffer.length;
-      const contentType = upstreamResponse.headers.get('content-type') || '';
-      if (contentType.includes('application/json') && buffer.length) {
-        try {
-          usage = extractUsageFromOllamaObject(JSON.parse(buffer.toString('utf8')));
-        } catch {
-          parseErrors = 1;
+      let payloadBuffer;
+      if (backend.kind === 'llama_cpp') {
+        const payload = JSON.parse(await upstreamResponse.text());
+        const normalized = prepared.responseKind === 'openai-chat'
+          ? openAiNonstreamForPublic(payload, activeModel.model)
+          : openAiCompletionToOllama(payload, { kind: prepared.responseKind, model: activeModel.model });
+        usage = prepared.responseKind === 'openai-chat'
+          ? payload.usage || null
+          : extractUsageFromOllamaObject(normalized);
+        payloadBuffer = Buffer.from(`${JSON.stringify(normalized)}\n`, 'utf8');
+        response.setHeader('content-type', 'application/json; charset=utf-8');
+        response.setHeader('x-ollama-router', 'local-ai-ollama-router');
+        response.setHeader('cache-control', 'no-store');
+      } else {
+        payloadBuffer = Buffer.from(await upstreamResponse.arrayBuffer());
+        const upstreamContentType = upstreamResponse.headers.get('content-type') || '';
+        if (upstreamContentType.includes('application/json') && payloadBuffer.length) {
+          try {
+            usage = extractUsageFromOllamaObject(JSON.parse(payloadBuffer.toString('utf8')));
+          } catch {
+            parseErrors = 1;
+          }
         }
+        copyUpstreamHeaders(upstreamResponse.headers, response, false);
       }
-      copyUpstreamHeaders(upstreamResponse.headers, response, false);
-      response.setHeader('content-length', buffer.length);
-      response.writeHead(upstreamResponse.status);
-      response.end(buffer);
+      if (prepared.reasoning?.outputLimitCapped) {
+        response.setHeader('x-router-effective-max-output-tokens', String(prepared.reasoning.outputTokens));
+      }
+      responseBytes = payloadBuffer.length;
+      response.setHeader('content-length', payloadBuffer.length);
+      response.writeHead(finalStatus);
+      response.end(payloadBuffer);
     }
   } catch (error) {
-    await persistEvent(context.store, { type: 'proxy_stream_failed', endpoint: pathname, error: error.message });
-    if (!response.headersSent) {
-      sendJson(response, 502, errorPayload('PROXY_STREAM_FAILED', error.message));
-    } else {
+    const clientClosed = clientController.signal.aborted;
+    const timedOut = error?.name === 'TimeoutError';
+    finalStatus = clientClosed ? 499 : (timedOut || error?.name === 'AbortError' ? 504 : 502);
+    await persistEvent(context.store, {
+      type: clientClosed ? 'client_cancelled' : 'upstream_request_failed',
+      endpoint: pathname,
+      backendKind: backend.kind,
+      error: error.message
+    });
+    if (!response.headersSent && !response.destroyed) {
+      sendJson(response, finalStatus, errorPayload(
+        clientClosed ? 'CLIENT_CLOSED_REQUEST' : (finalStatus === 504 ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_REQUEST_FAILED'),
+        clientClosed ? 'Client disconnected before completion.' : error.message
+      ));
+    } else if (!clientClosed) {
       response.destroy(error);
     }
   } finally {
-    const finalRecord = {
-      ...commonRecord,
-      allowed: true,
-      rejected: false,
-      responseStatus: upstreamResponse.status,
-      status: upstreamResponse.status,
-      upstreamError: !upstreamResponse.ok,
-      latencyMs: Date.now() - started,
-      responseBytes,
-      usage,
-      streamParseErrors: parseErrors
-    };
-    await persistRequest(context.store, context.metrics, finalRecord);
+    request.off('aborted', abortForClient);
+    response.off('close', abortForClient);
+    lease?.release();
+    if (!requestPersisted) {
+      await persistRequest(context.store, context.metrics, {
+        ...commonRecord,
+        allowed: true,
+        rejected: false,
+        responseStatus: finalStatus,
+        status: finalStatus,
+        upstreamError: finalStatus >= 500,
+        latencyMs: Date.now() - started,
+        responseBytes,
+        usage,
+        streamParseErrors: parseErrors,
+        backendKind: backend.kind,
+        contextPolicy: prepared?.context || null
+      });
+    }
   }
 }
 
@@ -870,6 +1164,20 @@ async function handleResponses(request, response, url, context) {
       incomingReasoningEffort: outcome.incomingReasoningEffort,
       incomingThink: outcome.incomingThink,
       forwardedThink: outcome.forwardedThink,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
+  }
+
+  if (outcome.outputLimitCapped) {
+    await persistEvent(context.store, {
+      type: 'output_limit_capped',
+      endpoint: url.pathname,
+      method: request.method,
+      model: outcome.forwardedModel,
+      reasoningEffort: outcome.reasoningEffort,
+      requestedOutputTokens: outcome.requestedOutputTokens,
+      effectiveOutputTokens: outcome.effectiveOutputTokens,
       clientIdentity: record.clientIdentity,
       sourceIp: record.sourceIp
     });
@@ -1025,10 +1333,13 @@ export async function createRouterServer(config = loadConfig()) {
   await store.init();
   const metrics = new Metrics();
   metrics.rebuild(store.requests);
+  const requestGate = new RequestGate(config.routerControlFile);
+  await requestGate.init();
   const context = {
     config,
     store,
     metrics,
+    requestGate,
     modelDiscovery: new ActiveModelDiscovery(config),
     state: {
       startedAt: nowIso(),

@@ -76,3 +76,47 @@ test('normalizes optional discovery metadata without requiring it on older marke
   assert.equal(info.revision, '7');
   assert.equal(typeof info.file_mtime_ms, 'number');
 });
+
+test('reads and writes additive volatile prompt-cache metadata while old markers default to null', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-cache-'));
+  const file = path.join(dir, 'active-model.json');
+  await writeActiveModelMarker(file, {
+    model: 'cache:model',
+    profile: 'cache-profile',
+    prompt_cache_mode: 'volatile_slot_lcp',
+    capability_profile: {
+      prompt_cache_volatile: true,
+      prompt_cache_persistence: false
+    }
+  });
+  const info = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.equal(info.prompt_cache_mode, 'volatile_slot_lcp');
+  assert.equal(info.capability_profile.prompt_cache_volatile, true);
+  assert.equal(info.capability_profile.prompt_cache_persistence, false);
+
+  const oldFile = path.join(dir, 'old-marker.json');
+  await fs.writeFile(oldFile, JSON.stringify({ model: 'old:model' }));
+  const oldInfo = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: oldFile, ADMIN_TOKEN: '' }));
+  assert.equal(oldInfo.prompt_cache_mode, null);
+  assert.equal(oldInfo.reasoning_policy, null);
+});
+
+test('reads and writes additive Flash reasoning policy metadata', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-llama-reasoning-'));
+  const file = path.join(dir, 'active-model.json');
+  const reasoningPolicy = {
+    kind: 'llama_cpp_template_budgeted',
+    mapping_kind: 'native_low_medium_high_local_max',
+    default_level: 'off',
+    public_levels: ['off', 'none', 'low', 'medium', 'high', 'max'],
+    answer_reserve: 1024,
+    levels: { off: { enabled: false, default_output_tokens: 512, max_output_tokens: 4096 } }
+  };
+  await writeActiveModelMarker(file, {
+    model: 'flash:model',
+    profile: 'flash',
+    reasoning_policy: reasoningPolicy
+  });
+  const info = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.deepEqual(info.reasoning_policy, reasoningPolicy);
+});

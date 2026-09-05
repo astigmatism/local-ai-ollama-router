@@ -6,6 +6,7 @@ import {
   validateReasoningCapabilities
 } from './reasoning.js';
 import { upstreamJson } from './upstream.js';
+import { resolveBackendAdapter, validatedReasoningPolicy } from './backend-adapters.js';
 
 const CANONICAL_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -146,6 +147,48 @@ function normalizeReasoningDefault(activeModel, validated, warnings) {
 }
 
 function reasoningMetadata(activeModel, capabilities, warnings) {
+  if (activeModel.reasoning_policy !== null && activeModel.reasoning_policy !== undefined) {
+    let policy;
+    try {
+      policy = validatedReasoningPolicy(activeModel);
+    } catch {
+      warnings.push('INVALID_REASONING_POLICY');
+      return {
+        supported: null,
+        efforts: {},
+        aliases: {},
+        default: null,
+        boolean_true_behavior: null,
+        output_limit_policy: null,
+        absolute_max_output_tokens: null,
+        per_effort: {}
+      };
+    }
+
+    const backendThinking = capabilities === null ? null : capabilities.includes('thinking');
+    if (backendThinking === false) warnings.push('BACKEND_THINKING_CAPABILITY_MISMATCH');
+    const efforts = {};
+    const perEffort = {};
+    for (const [level, entry] of Object.entries(policy.levels)) {
+      efforts[level] = level === 'off' ? 'none' : level;
+      perEffort[level] = {
+        enabled: entry.enabled,
+        default_output_tokens: entry.default_output_tokens,
+        max_output_tokens: entry.max_output_tokens
+      };
+    }
+    return {
+      supported: backendThinking === false ? false : true,
+      efforts,
+      aliases: { ...policy.aliases },
+      default: policy.default_level,
+      boolean_true_behavior: { ...policy.boolean_true_behavior },
+      output_limit_policy: policy.output_limit_policy,
+      absolute_max_output_tokens: Math.max(...Object.values(policy.levels).map((entry) => entry.max_output_tokens)),
+      per_effort: perEffort
+    };
+  }
+
   let validated = null;
   try {
     validated = validateReasoningCapabilities(activeModel);
@@ -242,8 +285,8 @@ export class ActiveModelDiscovery {
 
   async refresh(activeModel, key, generation) {
     const [ps, show] = await Promise.all([
-      this.readUpstreamPs(),
-      this.readUpstreamShow(activeModel.model)
+      this.readUpstreamPs(activeModel),
+      this.readUpstreamShow(activeModel)
     ]);
     const warnings = [...(activeModel.metadata_warnings || [])];
     if (activeModel.loadedFrom !== 'file') warnings.push('ACTIVE_MODEL_MARKER_UNAVAILABLE');
@@ -265,12 +308,15 @@ export class ActiveModelDiscovery {
       created: createdTimestamp(activeModel, this.startedAtMs),
       owned_by: this.config.appName,
       x_ollama_router: {
-        schema_version: 1,
+        schema_version: 2,
         alias: true,
+        backend_kind: activeModel.backend_kind || 'ollama',
         upstream_model: activeModel.model,
         profile: activeModel.profile || null,
         updated_at: updatedAt,
         context_window: loadedContext ?? activeModel.context_length ?? architecturalContext,
+        total_context_window: activeModel.total_context_length ?? loadedContext ?? activeModel.context_length ?? architecturalContext,
+        active_request_limit: activeModel.max_active_requests ?? null,
         model_context_window: architecturalContext,
         max_output_tokens: activeModel.max_output_tokens ?? null,
         input_modalities: normalizeModalities(activeModel, capabilities),
@@ -279,7 +325,10 @@ export class ActiveModelDiscovery {
         sources: {
           active_model_marker: activeModel.loadedFrom === 'file',
           ollama_ps: ps.available,
-          ollama_show: show.available
+          ollama_show: show.available,
+          ...((activeModel.backend_kind || 'ollama') === 'llama_cpp'
+            ? { backend_status: ps.available, backend_metadata: show.available }
+            : {})
         },
         complete: uniqueWarnings.length === 0,
         warnings: uniqueWarnings
@@ -308,35 +357,44 @@ export class ActiveModelDiscovery {
     return { ...value, refreshed: true };
   }
 
-  async readUpstreamPs() {
+  async readUpstreamPs(activeModel) {
     try {
-      const result = await this.upstreamJson(this.config, '/api/ps', {
-        timeoutMs: Math.min(this.config.upstreamTimeoutMs, 10000)
-      });
-      if (!result.ok) return { available: false, body: null, warning: 'OLLAMA_PS_UNAVAILABLE' };
-      if (!isPlainObject(result.body) || !Array.isArray(result.body.models)) {
-        return { available: false, body: null, warning: 'OLLAMA_PS_INVALID_RESPONSE' };
+      if ((activeModel.backend_kind || 'ollama') === 'ollama') {
+        const result = await this.upstreamJson(this.config, '/api/ps', {
+          timeoutMs: Math.min(this.config.upstreamTimeoutMs, 10000)
+        });
+        if (!result.ok) return { available: false, body: null, warning: 'OLLAMA_PS_UNAVAILABLE' };
+        if (!isPlainObject(result.body) || !Array.isArray(result.body.models)) {
+          return { available: false, body: null, warning: 'OLLAMA_PS_INVALID_RESPONSE' };
+        }
+        return { available: true, body: result.body, warning: null };
       }
-      return { available: true, body: result.body, warning: null };
+      const body = await resolveBackendAdapter(this.config, activeModel).ps();
+      if (!isPlainObject(body) || !Array.isArray(body.models)) {
+        return { available: false, body: null, warning: 'BACKEND_STATUS_INVALID_RESPONSE' };
+      }
+      return { available: true, body, warning: null };
     } catch {
-      return { available: false, body: null, warning: 'OLLAMA_PS_UNAVAILABLE' };
+      return { available: false, body: null, warning: activeModel.backend_kind === 'llama_cpp' ? 'BACKEND_STATUS_UNAVAILABLE' : 'OLLAMA_PS_UNAVAILABLE' };
     }
   }
 
-  async readUpstreamShow(model) {
+  async readUpstreamShow(activeModel) {
     try {
-      const result = await this.upstreamJson(this.config, '/api/show', {
-        method: 'POST',
-        body: { model },
-        timeoutMs: Math.min(this.config.upstreamTimeoutMs, 10000)
-      });
-      if (!result.ok) return { available: false, body: null, warning: 'OLLAMA_SHOW_UNAVAILABLE' };
+      const result = (activeModel.backend_kind || 'ollama') === 'ollama'
+        ? await this.upstreamJson(this.config, '/api/show', {
+          method: 'POST',
+          body: { model: activeModel.model },
+          timeoutMs: Math.min(this.config.upstreamTimeoutMs, 10000)
+        })
+        : await resolveBackendAdapter(this.config, activeModel).show(activeModel.model);
+      if (!result.ok) return { available: false, body: null, warning: activeModel.backend_kind === 'llama_cpp' ? 'BACKEND_METADATA_UNAVAILABLE' : 'OLLAMA_SHOW_UNAVAILABLE' };
       if (!isPlainObject(result.body)) {
-        return { available: false, body: null, warning: 'OLLAMA_SHOW_INVALID_RESPONSE' };
+        return { available: false, body: null, warning: activeModel.backend_kind === 'llama_cpp' ? 'BACKEND_METADATA_INVALID_RESPONSE' : 'OLLAMA_SHOW_INVALID_RESPONSE' };
       }
       return { available: true, body: result.body, warning: null };
     } catch {
-      return { available: false, body: null, warning: 'OLLAMA_SHOW_UNAVAILABLE' };
+      return { available: false, body: null, warning: activeModel.backend_kind === 'llama_cpp' ? 'BACKEND_METADATA_UNAVAILABLE' : 'OLLAMA_SHOW_UNAVAILABLE' };
     }
   }
 }

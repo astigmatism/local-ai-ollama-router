@@ -4,6 +4,8 @@ import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
 import { createModelCapabilityLookup, normalizeThinkForModel, upstreamFetch } from './upstream.js';
 import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
+import { BackendAdapterError, resolveBackendAdapter } from './backend-adapters.js';
+import { RequestGateError } from './request-gate.js';
 import {
   RESPONSES_REASONING_EFFORTS,
   thinkLevelToReasoningEffort,
@@ -1046,6 +1048,10 @@ function outcomeBase(started, pathname, body, activeModel, translated, toolPolic
     thinkNormalized: translated?.thinkNormalized ?? false,
     thinkingSupported: translated?.thinkingSupported ?? null,
     reasoningEffort: translated?.reasoningEffort ?? null,
+    requestedOutputTokens: translated?.requestedOutputTokens ?? null,
+    effectiveOutputTokens: translated?.effectiveOutputTokens ?? null,
+    outputLimitCapped: translated?.outputLimitCapped ?? false,
+    outputLimitPolicy: translated?.outputLimitPolicy ?? null,
     toolsPresent: tools.toolsPresent,
     toolCount: tools.toolCount,
     toolChoicePresent: tools.toolChoicePresent,
@@ -1068,6 +1074,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
   let abortState = null;
   let writer = null;
   let builder = null;
+  let backend = null;
+  let lease = null;
 
   try {
     if (request.method !== 'POST') {
@@ -1084,23 +1092,34 @@ export async function handleResponsesRequest(request, response, pathname, contex
     toolPolicy = emptyToolPolicy(body, context.config.unsupportedToolsPolicy);
 
     activeModelInfo = await readActiveModel(context.config);
-    if (context.state.maintenanceMode) {
-      throw new ResponsesApiError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.', null, 'server_error');
-    }
-    const capabilityLookup = createModelCapabilityLookup(context.config, activeModelInfo.model);
-    try {
-      toolPolicy = await normalizeToolsForModel(
-        body,
-        activeModelInfo.model,
-        context.config.unsupportedToolsPolicy,
-        capabilityLookup
+    if (context.state.maintenanceMode || context.requestGate.draining) {
+      throw new ResponsesApiError(
+        503,
+        context.requestGate.draining ? 'BACKEND_DRAINING' : 'MAINTENANCE_MODE',
+        context.requestGate.draining
+          ? 'The active inference backend is draining for a runtime transition. Retry shortly.'
+          : 'Router maintenance mode is enabled.',
+        null,
+        'server_error'
       );
-    } catch (error) {
-      if (error.code === 'UNSUPPORTED_TOOLS' || error.code === 'UNSUPPORTED_TOOL_HISTORY') {
-        toolPolicy = { ...toolPolicy, toolsSupported: false };
-        throw new ResponsesApiError(error.statusCode, error.code, error.message, error.param);
+    }
+    backend = resolveBackendAdapter(context.config, activeModelInfo);
+    const capabilityLookup = createModelCapabilityLookup(backend.upstreamConfig, activeModelInfo.model);
+    if (backend.kind === 'ollama') {
+      try {
+        toolPolicy = await normalizeToolsForModel(
+          body,
+          activeModelInfo.model,
+          context.config.unsupportedToolsPolicy,
+          capabilityLookup
+        );
+      } catch (error) {
+        if (error.code === 'UNSUPPORTED_TOOLS' || error.code === 'UNSUPPORTED_TOOL_HISTORY') {
+          toolPolicy = { ...toolPolicy, toolsSupported: false };
+          throw new ResponsesApiError(error.statusCode, error.code, error.message, error.param);
+        }
+        throw error;
       }
-      throw error;
     }
 
     let defaultThink;
@@ -1120,21 +1139,25 @@ export async function handleResponsesRequest(request, response, pathname, contex
     );
     let thinkPolicy;
     try {
-      thinkPolicy = await normalizeThinkForModel(
-        context.config,
-        activeModelInfo.model,
-        translated.upstreamBody,
-        activeModelInfo,
-        capabilityLookup
-      );
+      thinkPolicy = backend.kind === 'ollama'
+        ? await normalizeThinkForModel(
+          backend.upstreamConfig,
+          activeModelInfo.model,
+          translated.upstreamBody,
+          activeModelInfo,
+          capabilityLookup
+        )
+        : {
+          body: translated.upstreamBody,
+          incomingThink: translated.upstreamBody?.think,
+          forwardedThink: undefined,
+          thinkMapped: false,
+          thinkDropped: false,
+          thinkNormalized: false,
+          thinkingSupported: null
+        };
     } catch (error) {
-      throw new ResponsesApiError(
-        error.statusCode || 503,
-        error.code || 'INVALID_REASONING_CAPABILITIES',
-        error.message,
-        'reasoning',
-        (error.statusCode || 503) >= 500 ? 'server_error' : 'invalid_request_error'
-      );
+      throw new ResponsesApiError(error.statusCode || 503, error.code || 'INVALID_REASONING_CAPABILITIES', error.message, 'reasoning', (error.statusCode || 503) >= 500 ? 'server_error' : 'invalid_request_error');
     }
     translated.upstreamBody = thinkPolicy.body;
     translated.incomingThink = thinkPolicy.incomingThink;
@@ -1150,6 +1173,41 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.toolsSupported = toolPolicy.toolsSupported;
     translated.toolsDropped = toolPolicy.toolsDropped;
     translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
+    translated.originalBody = body;
+    let backendRequest;
+    try {
+      // Template application/tokenization is part of an accepted generation
+      // request. Hold the lease across it so draining cannot interrupt a
+      // request between admission and backend inference.
+      lease = context.requestGate.acquire({
+        endpoint: pathname,
+        clientIdentity: request.headers['x-client-name'] || request.socket.remoteAddress,
+        limit: backend.maxActiveRequests
+      });
+      backendRequest = backend.prepareResponses(translated);
+      if (backendRequest.reasoning) {
+        Object.assign(translated, {
+          reasoningEffort: backendRequest.reasoning.level,
+          thinkingSupported: true,
+          requestedOutputTokens: backendRequest.reasoning.requestedOutputTokens,
+          effectiveOutputTokens: backendRequest.reasoning.outputTokens,
+          outputLimitCapped: backendRequest.reasoning.outputLimitCapped,
+          outputLimitPolicy: backendRequest.reasoning.outputLimitPolicy
+        });
+      }
+      if (backend.validateResponsesContext) await backend.validateResponsesContext(backendRequest);
+    } catch (error) {
+      if (error instanceof BackendAdapterError || error instanceof RequestGateError) {
+        throw new ResponsesApiError(
+          error.statusCode,
+          error.code,
+          error.message,
+          error.param,
+          error.statusCode >= 500 ? 'server_error' : 'invalid_request_error'
+        );
+      }
+      throw error;
+    }
     abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
 
     const responseId = newId('resp');
@@ -1160,7 +1218,10 @@ export async function handleResponsesRequest(request, response, pathname, contex
         'cache-control': 'no-store',
         connection: 'keep-alive',
         'x-ollama-router': 'local-ai-ollama-router',
-        'x-accel-buffering': 'no'
+        'x-accel-buffering': 'no',
+        ...(backendRequest.reasoning?.outputLimitCapped
+          ? { 'x-router-effective-max-output-tokens': String(backendRequest.reasoning.outputTokens) }
+          : {})
       });
       writer = new SseWriter(response);
       builder = new StreamingResponseBuilder(
@@ -1178,13 +1239,13 @@ export async function handleResponsesRequest(request, response, pathname, contex
 
     let upstreamResponse;
     try {
-      upstreamResponse = await upstreamFetch(context.config, '/api/chat', {
+      upstreamResponse = await upstreamFetch(backend.upstreamConfig, backendRequest.path, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           accept: translated.stream ? 'application/x-ndjson' : 'application/json'
         },
-        body: JSON.stringify(translated.upstreamBody),
+        body: JSON.stringify(backendRequest.body),
         signal: abortState.signal
       });
     } catch (error) {
@@ -1202,8 +1263,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
         };
       }
       const apiError = abortState.timedOut() || error?.name === 'TimeoutError'
-        ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
-        : new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', error.message || 'Could not reach Ollama.', null, 'server_error');
+        ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for the active backend.', null, 'server_error')
+        : new ResponsesApiError(502, 'UPSTREAM_REQUEST_FAILED', error.message || 'Could not reach the active backend.', null, 'server_error');
       if (builder && writer && !response.destroyed) {
         await endFailedStream(builder, writer, apiError);
         return {
@@ -1221,6 +1282,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
       }
       throw apiError;
     }
+
+    upstreamResponse = await backend.adaptResponsesResponse(upstreamResponse, translated.stream);
 
     if (!upstreamResponse.ok) {
       const upstreamMessage = await readUpstreamError(upstreamResponse);
@@ -1248,7 +1311,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       try {
         upstreamPayload = JSON.parse(await upstreamResponse.text());
       } catch {
-        throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_RESPONSE', 'Ollama returned invalid JSON.', null, 'server_error');
+        throw new ResponsesApiError(502, 'MALFORMED_UPSTREAM_RESPONSE', 'The active backend returned invalid JSON.', null, 'server_error');
       }
       const payload = translateOllamaResponse(
         upstreamPayload,
@@ -1259,7 +1322,12 @@ export async function handleResponsesRequest(request, response, pathname, contex
         translated.toolNames
       );
       const responseBytes = Buffer.byteLength(`${JSON.stringify(payload, null, 2)}\n`);
-      sendJson(response, 200, payload, { 'x-ollama-router': 'local-ai-ollama-router' });
+      sendJson(response, 200, payload, {
+        'x-ollama-router': 'local-ai-ollama-router',
+        ...(backendRequest.reasoning?.outputLimitCapped
+          ? { 'x-router-effective-max-output-tokens': String(backendRequest.reasoning.outputTokens) }
+          : {})
+      });
       return {
         ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
         allowed: true,
@@ -1304,7 +1372,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       const apiError = error instanceof ResponsesApiError
         ? error
         : (abortState.timedOut()
-          ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
+          ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for the active backend.', null, 'server_error')
           : new ResponsesApiError(502, 'UPSTREAM_STREAM_FAILED', error.message, null, 'server_error'));
       await endFailedStream(builder, writer, apiError);
       return {
@@ -1348,5 +1416,6 @@ export async function handleResponsesRequest(request, response, pathname, contex
     };
   } finally {
     abortState?.cleanup();
+    lease?.release();
   }
 }
