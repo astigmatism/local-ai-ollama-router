@@ -67,6 +67,7 @@ const UNSUPPORTED_CONTROL_FIELDS = new Set([
   'parallel_tool_calls',
   'functions',
   'function_call',
+  'max_tool_calls',
   'images',
   'audio',
   'video',
@@ -96,6 +97,14 @@ const UNSUPPORTED_CONTROL_FIELDS = new Set([
   'upstream_url'
 ]);
 
+const LLAMA_TOOL_CONTROL_FIELDS = new Set([
+  'tools',
+  'tool_choice',
+  'parallel_tool_calls',
+  'functions',
+  'function_call'
+]);
+
 const STRICT_REASONING_CONTROL_FIELDS = new Set([
   'reasoning_budget_tokens',
   'reasoning_budget_message',
@@ -106,7 +115,7 @@ const STRICT_REASONING_CONTROL_FIELDS = new Set([
   'chat_template_kwargs'
 ]);
 
-function rejectUnsupportedFields(body) {
+function rejectUnsupportedFields(body, { allowTools = false } = {}) {
   for (const field of STRICT_REASONING_CONTROL_FIELDS) {
     if (Object.hasOwn(body || {}, field)) {
       throw new BackendAdapterError(
@@ -118,6 +127,7 @@ function rejectUnsupportedFields(body) {
     }
   }
   for (const field of UNSUPPORTED_CONTROL_FIELDS) {
+    if (allowTools && LLAMA_TOOL_CONTROL_FIELDS.has(field)) continue;
     if (Object.hasOwn(body || {}, field) && body[field] !== null && body[field] !== false) {
       throw new BackendAdapterError(
         400,
@@ -167,9 +177,152 @@ function rejectUnsupportedFields(body) {
   }
 }
 
+function parseToolArguments(value, param) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      throw new BackendAdapterError(400, 'INVALID_TOOL_ARGUMENTS', `${param} must contain a JSON object.`, param);
+    }
+  }
+  if (!isPlainObject(parsed)) {
+    throw new BackendAdapterError(400, 'INVALID_TOOL_ARGUMENTS', `${param} must be a JSON object.`, param);
+  }
+  return parsed;
+}
+
+function normalizedToolDefinition(tool, param) {
+  if (!isPlainObject(tool) || tool.type !== 'function' || !isPlainObject(tool.function)) {
+    throw new BackendAdapterError(400, 'INVALID_TOOL', `${param} must be a function tool.`, param);
+  }
+  const fn = tool.function;
+  if (typeof fn.name !== 'string' || !fn.name.trim()) {
+    throw new BackendAdapterError(400, 'INVALID_TOOL', `${param}.function.name must be a non-empty string.`, `${param}.function.name`);
+  }
+  if (fn.description !== undefined && typeof fn.description !== 'string') {
+    throw new BackendAdapterError(400, 'INVALID_TOOL', `${param}.function.description must be a string.`, `${param}.function.description`);
+  }
+  if (fn.parameters !== undefined && !isPlainObject(fn.parameters)) {
+    throw new BackendAdapterError(400, 'INVALID_TOOL', `${param}.function.parameters must be a JSON Schema object.`, `${param}.function.parameters`);
+  }
+  return {
+    type: 'function',
+    function: {
+      name: fn.name,
+      ...(fn.description === undefined ? {} : { description: fn.description }),
+      parameters: fn.parameters || { type: 'object', properties: {} }
+    }
+  };
+}
+
+function normalizedToolChoice(value, param) {
+  if (['auto', 'none', 'required'].includes(value)) return value;
+  if (isPlainObject(value)) {
+    const fn = value.function;
+    if (value.type === 'function' && isPlainObject(fn) && typeof fn.name === 'string' && fn.name) {
+      return { type: 'function', function: { name: fn.name } };
+    }
+    if (param === 'function_call' && typeof value.name === 'string' && value.name) {
+      return { type: 'function', function: { name: value.name } };
+    }
+  }
+  throw new BackendAdapterError(400, 'INVALID_TOOL_CHOICE', `${param} must be auto, none, required, or a named function.`, param);
+}
+
+export function normalizeLlamaToolRequest(body, activeModel, protocol) {
+  const toolsSupported = activeModel?.capability_profile?.tools === true;
+  const toolFieldsPresent = [...LLAMA_TOOL_CONTROL_FIELDS].some((field) => Object.hasOwn(body || {}, field));
+  if (!toolFieldsPresent) return { tools: [], controls: {}, templateControls: {} };
+  if (!toolsSupported || protocol === 'native-generate') {
+    throw new BackendAdapterError(
+      400,
+      'UNSUPPORTED_PROFILE_CAPABILITY',
+      'Tools are not supported by the active model profile on this route.',
+      'tools'
+    );
+  }
+  if (Object.hasOwn(body, 'tools') && Object.hasOwn(body, 'functions')) {
+    throw new BackendAdapterError(400, 'CONFLICTING_TOOL_FIELDS', 'tools and functions cannot both be supplied.', 'tools');
+  }
+  if (Object.hasOwn(body, 'tool_choice') && Object.hasOwn(body, 'function_call')) {
+    throw new BackendAdapterError(400, 'CONFLICTING_TOOL_FIELDS', 'tool_choice and function_call cannot both be supplied.', 'tool_choice');
+  }
+
+  let rawTools = body.tools;
+  if (Object.hasOwn(body, 'functions')) {
+    if (!Array.isArray(body.functions)) {
+      throw new BackendAdapterError(400, 'INVALID_TOOLS', 'functions must be an array.', 'functions');
+    }
+    rawTools = body.functions.map((fn) => ({ type: 'function', function: fn }));
+  }
+  if (rawTools !== undefined && !Array.isArray(rawTools)) {
+    throw new BackendAdapterError(400, 'INVALID_TOOLS', 'tools must be an array.', 'tools');
+  }
+  const tools = (rawTools || []).map((tool, index) => normalizedToolDefinition(tool, `tools[${index}]`));
+
+  const rawChoice = body.tool_choice ?? body.function_call;
+  const choiceParam = Object.hasOwn(body, 'tool_choice') ? 'tool_choice' : 'function_call';
+  const toolChoice = rawChoice === undefined ? undefined : normalizedToolChoice(rawChoice, choiceParam);
+  if (body.parallel_tool_calls !== undefined && typeof body.parallel_tool_calls !== 'boolean') {
+    throw new BackendAdapterError(400, 'INVALID_PARALLEL_TOOL_CALLS', 'parallel_tool_calls must be a boolean.', 'parallel_tool_calls');
+  }
+
+  const controls = {
+    ...((Object.hasOwn(body, 'tools') || Object.hasOwn(body, 'functions')) ? { tools } : {}),
+    ...(toolChoice === undefined ? {} : { tool_choice: toolChoice }),
+    ...(body.parallel_tool_calls === undefined ? {} : { parallel_tool_calls: body.parallel_tool_calls })
+  };
+  return {
+    tools,
+    controls,
+    templateControls: tools.length ? { tools } : {}
+  };
+}
+
 function messagesForLlama(messages, protocol) {
+  const knownCalls = new Map();
+  const pendingCalls = [];
+  const usedResults = new Set();
+
+  const resolveToolCallId = (message, index) => {
+    const suppliedId = message?.tool_call_id;
+    const suppliedName = message?.tool_name ?? message?.name;
+    if (suppliedId !== undefined && (typeof suppliedId !== 'string' || !suppliedId)) {
+      throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}].tool_call_id must be a non-empty string.`, `messages[${index}].tool_call_id`);
+    }
+    if (suppliedId) {
+      const known = knownCalls.get(suppliedId);
+      if (!known || usedResults.has(suppliedId) || (suppliedName && suppliedName !== known.name)) {
+        throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}] does not match a preceding function call.`, `messages[${index}].tool_call_id`);
+      }
+      usedResults.add(suppliedId);
+      return { id: suppliedId, name: known.name };
+    }
+    const candidates = pendingCalls.filter((call) => !usedResults.has(call.id)
+      && (!suppliedName || call.name === suppliedName));
+    if (candidates.length !== 1) {
+      throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}] must identify exactly one preceding function call.`, `messages[${index}].tool_call_id`);
+    }
+    usedResults.add(candidates[0].id);
+    return candidates[0];
+  };
+
   return messages.map((message, index) => {
     const role = message?.role;
+    if (role === 'tool' || role === 'function') {
+      const resolved = resolveToolCallId(message, index);
+      if (message?.content !== undefined && typeof message.content !== 'string' && !Array.isArray(message.content)) {
+        throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}].content must be text.`, `messages[${index}].content`);
+      }
+      return {
+        role: 'tool',
+        content: chatText(message?.content),
+        tool_call_id: resolved.id,
+        name: resolved.name
+      };
+    }
+
     const mapped = { role, content: chatText(message?.content) };
     const reasoningValue = protocol === 'openai-chat' ? message?.reasoning_content : message?.thinking;
     const reasoningField = protocol === 'openai-chat' ? 'reasoning_content' : 'thinking';
@@ -183,6 +336,50 @@ function messagesForLlama(messages, protocol) {
     if (alternate !== undefined) {
       const alternateField = protocol === 'openai-chat' ? 'thinking' : 'reasoning_content';
       throw new BackendAdapterError(400, 'INVALID_REASONING_HISTORY', `${alternateField} is not valid for this public route.`, `messages[${index}].${alternateField}`);
+    }
+
+    const rawToolCalls = message?.tool_calls;
+    const legacyFunctionCall = message?.function_call;
+    if (rawToolCalls !== undefined || legacyFunctionCall !== undefined) {
+      if (role !== 'assistant') {
+        throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}] tool calls are valid only on assistant messages.`, `messages[${index}].tool_calls`);
+      }
+      if (rawToolCalls !== undefined && legacyFunctionCall !== undefined) {
+        throw new BackendAdapterError(400, 'CONFLICTING_TOOL_FIELDS', 'tool_calls and function_call cannot both be supplied on a history message.', `messages[${index}].tool_calls`);
+      }
+      const calls = rawToolCalls ?? [{ type: 'function', function: legacyFunctionCall }];
+      if (!Array.isArray(calls) || calls.length === 0) {
+        throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `messages[${index}].tool_calls must be a non-empty array.`, `messages[${index}].tool_calls`);
+      }
+      mapped.tool_calls = calls.map((call, callIndex) => {
+        const param = `messages[${index}].tool_calls[${callIndex}]`;
+        if (!isPlainObject(call) || (call.type !== undefined && call.type !== 'function') || !isPlainObject(call.function)) {
+          throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `${param} must be a function call.`, param);
+        }
+        if (typeof call.function.name !== 'string' || !call.function.name) {
+          throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `${param}.function.name must be a non-empty string.`, `${param}.function.name`);
+        }
+        const suppliedId = call.id ?? call.call_id;
+        if (suppliedId !== undefined && (typeof suppliedId !== 'string' || !suppliedId)) {
+          throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `${param}.id must be a non-empty string.`, `${param}.id`);
+        }
+        const id = suppliedId || `call_router_${index}_${callIndex}`;
+        if (knownCalls.has(id)) {
+          throw new BackendAdapterError(400, 'INVALID_TOOL_HISTORY', `Duplicate tool call ID ${id}.`, `${param}.id`);
+        }
+        const normalized = {
+          id,
+          type: 'function',
+          function: {
+            name: call.function.name,
+            arguments: JSON.stringify(parseToolArguments(call.function.arguments ?? {}, `${param}.function.arguments`))
+          }
+        };
+        const known = { id, name: call.function.name };
+        knownCalls.set(id, known);
+        pendingCalls.push(known);
+        return normalized;
+      });
     }
     return mapped;
   });
@@ -446,7 +643,9 @@ export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
     cleanBody.options = { ...cleanBody.options };
     delete cleanBody.options.reasoning_effort;
   }
-  rejectUnsupportedFields(cleanBody);
+  rejectUnsupportedFields(cleanBody, {
+    allowTools: activeModel?.capability_profile?.tools === true && protocol !== 'native-generate'
+  });
 
   const controls = entry.enabled
     ? {
@@ -513,10 +712,52 @@ function completionUsage(payload) {
   };
 }
 
+function openAiToolCallsToOllama(rawToolCalls) {
+  if (rawToolCalls === undefined || rawToolCalls === null) return [];
+  if (!Array.isArray(rawToolCalls)) {
+    throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned malformed function calls.');
+  }
+  const ids = new Set();
+  return rawToolCalls.map((call, index) => {
+    if (!isPlainObject(call) || !isPlainObject(call.function)
+      || typeof call.function.name !== 'string' || !call.function.name) {
+      throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned a malformed function call.');
+    }
+    const id = typeof call.id === 'string' && call.id
+      ? call.id
+      : (typeof call.call_id === 'string' && call.call_id ? call.call_id : `call_llama_${index}`);
+    if (ids.has(id)) {
+      throw new BackendAdapterError(502, 'DUPLICATE_UPSTREAM_TOOL_CALL_ID', 'llama.cpp returned duplicate function call IDs.');
+    }
+    ids.add(id);
+    let args = call.function.arguments;
+    if (typeof args === 'string') {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS', 'llama.cpp returned malformed function arguments.');
+      }
+    }
+    if (!isPlainObject(args)) {
+      throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS', 'llama.cpp function arguments must be a JSON object.');
+    }
+    return {
+      id,
+      type: 'function',
+      function: {
+        ...(Number.isInteger(call.function.index) ? { index: call.function.index } : {}),
+        name: call.function.name,
+        arguments: args
+      }
+    };
+  });
+}
+
 export function openAiCompletionToOllama(payload, { kind, model }) {
   const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
   const content = choice?.message?.content ?? choice?.text ?? '';
   const thinking = typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content : '';
+  const toolCalls = openAiToolCallsToOllama(choice?.message?.tool_calls);
   const usage = completionUsage(payload);
   const common = {
     model,
@@ -528,7 +769,15 @@ export function openAiCompletionToOllama(payload, { kind, model }) {
     ...(payload?.timings ? { timings: payload.timings } : {})
   };
   if (kind === 'native-generate') return { ...common, response: content };
-  return { ...common, message: { role: 'assistant', content, ...(thinking ? { thinking } : {}) } };
+  return {
+    ...common,
+    message: {
+      role: 'assistant',
+      content,
+      ...(thinking ? { thinking } : {}),
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {})
+    }
+  };
 }
 
 function sseFrames(buffer, flush = false) {
@@ -551,12 +800,82 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
   let buffer = '';
   let doneSent = false;
   let lastPayload = null;
+  let toolsSent = false;
+  const pendingToolCalls = new Map();
+
+  const recordToolDeltas = (rawToolCalls) => {
+    if (rawToolCalls === undefined) return;
+    if (!Array.isArray(rawToolCalls)) {
+      throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned malformed streaming function calls.');
+    }
+    rawToolCalls.forEach((call, position) => {
+      if (!isPlainObject(call)) {
+        throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned a malformed streaming function call.');
+      }
+      const index = Number.isInteger(call.index) ? call.index : position;
+      let pending = pendingToolCalls.get(index);
+      if (!pending) {
+        pending = { index, id: null, type: 'function', name: null, arguments: '' };
+        pendingToolCalls.set(index, pending);
+      }
+      if (call.id !== undefined) {
+        if (typeof call.id !== 'string' || !call.id || (pending.id && pending.id !== call.id)) {
+          throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned an inconsistent streaming function call ID.');
+        }
+        pending.id = call.id;
+      }
+      if (call.type !== undefined && call.type !== 'function') {
+        throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned an unsupported streaming tool type.');
+      }
+      if (call.function !== undefined) {
+        if (!isPlainObject(call.function)) {
+          throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned a malformed streaming function call.');
+        }
+        if (call.function.name !== undefined) {
+          if (typeof call.function.name !== 'string' || !call.function.name
+            || (pending.name && pending.name !== call.function.name)) {
+            throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned an inconsistent streaming function name.');
+          }
+          pending.name = call.function.name;
+        }
+        if (call.function.arguments !== undefined) {
+          if (typeof call.function.arguments === 'string') {
+            pending.arguments += call.function.arguments;
+          } else if (isPlainObject(call.function.arguments) && !pending.arguments) {
+            pending.arguments = JSON.stringify(call.function.arguments);
+          } else {
+            throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS', 'llama.cpp returned malformed streaming function arguments.');
+          }
+        }
+      }
+    });
+  };
+
+  const emitPendingTools = (controller) => {
+    if (toolsSent || pendingToolCalls.size === 0) return;
+    const calls = [...pendingToolCalls.values()]
+      .sort((left, right) => left.index - right.index)
+      .map((call) => ({
+        id: call.id || `call_llama_${call.index}`,
+        type: 'function',
+        function: { index: call.index, name: call.name, arguments: call.arguments || '{}' }
+      }));
+    const toolCalls = openAiToolCallsToOllama(calls);
+    controller.enqueue(encoder.encode(`${JSON.stringify({
+      model,
+      created_at: new Date().toISOString(),
+      message: { role: 'assistant', content: '', tool_calls: toolCalls },
+      done: false
+    })}\n`));
+    toolsSent = true;
+  };
 
   const convertFrame = (frame, controller) => {
     const data = dataLines(frame);
     if (!data) return;
     if (data === '[DONE]') {
       if (!doneSent) {
+        emitPendingTools(controller);
         const finalPayload = {
           model,
           created_at: new Date().toISOString(),
@@ -583,6 +902,7 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
     const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
     const content = choice?.delta?.content ?? choice?.text ?? '';
     const thinking = typeof choice?.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '';
+    recordToolDeltas(choice?.delta?.tool_calls);
     if (thinking && kind !== 'native-generate') {
       controller.enqueue(encoder.encode(`${JSON.stringify({
         model,
@@ -601,6 +921,7 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
       controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
     }
     if (choice?.finish_reason && !doneSent) {
+      emitPendingTools(controller);
       const finalPayload = {
         model,
         created_at: new Date().toISOString(),
@@ -801,7 +1122,11 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       status: 200,
       body: {
         model: this.activeModel.model,
-        capabilities: ['completion', ...(this.activeModel.reasoning_policy ? ['thinking'] : [])],
+        capabilities: [
+          'completion',
+          ...(this.activeModel.reasoning_policy ? ['thinking'] : []),
+          ...(this.activeModel.capability_profile?.tools === true ? ['tools'] : [])
+        ],
         details: { backend: 'llama_cpp' },
         model_info: { context_length: this.activeModel.context_length }
       },
@@ -819,7 +1144,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
         body: {
           messages,
           ...(templateControls.chat_template_kwargs ? { chat_template_kwargs: templateControls.chat_template_kwargs } : {}),
-          ...(templateControls.reasoning_effort ? { reasoning_effort: templateControls.reasoning_effort } : {})
+          ...(templateControls.reasoning_effort ? { reasoning_effort: templateControls.reasoning_effort } : {}),
+          ...(templateControls.tools ? { tools: templateControls.tools } : {})
         },
         timeoutMs: Math.min(this.config.upstreamTimeoutMs, 120000)
       });
@@ -886,16 +1212,20 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       throw new BackendAdapterError(400, 'INVALID_MESSAGES', 'At least one chat message is required.', 'messages');
     }
     const reasoning = normalizeLlamaReasoningRequest(body, this.activeModel, protocol);
+    const toolRequest = normalizeLlamaToolRequest(reasoning.cleanBody, this.activeModel, protocol);
     const outputTokens = reasoning.outputTokens;
-    const context = await this.validateContext(messages, outputTokens, reasoning.controls);
+    const mappedMessages = messagesForLlama(messages, protocol);
+    const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
+    const context = await this.validateContext(mappedMessages, outputTokens, templateControls);
     const temperature = Number(body?.temperature ?? body?.options?.temperature ?? 0);
     const upstreamBody = {
       model: this.activeModel.model,
-      messages: messagesForLlama(messages, protocol),
+      messages: mappedMessages,
       stream: body?.stream !== false,
       temperature: Number.isFinite(temperature) ? temperature : 0,
       max_tokens: outputTokens,
       ...reasoning.controls,
+      ...toolRequest.controls,
       ...(body?.seed === undefined ? {} : { seed: body.seed }),
       ...(body?.stop === undefined ? {} : { stop: body.stop }),
       ...(body?.top_p === undefined && body?.options?.top_p === undefined ? {} : { top_p: body?.top_p ?? body?.options?.top_p })
@@ -907,7 +1237,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       streaming: upstreamBody.stream,
       method: 'POST',
       context,
-      reasoning
+      reasoning,
+      templateControls
     };
   }
 
@@ -929,20 +1260,31 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
 
   prepareResponses(translated) {
     const reasoning = normalizeLlamaReasoningRequest(translated.originalBody || {}, this.activeModel, 'responses');
+    const toolRequest = normalizeLlamaToolRequest(translated.upstreamBody, this.activeModel, 'responses');
     const outputTokens = reasoning.outputTokens;
+    const messages = messagesForLlama(translated.upstreamBody.messages, 'responses');
+    const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
     const body = {
       model: this.activeModel.model,
-      messages: messagesForLlama(translated.upstreamBody.messages, 'responses'),
+      messages,
       stream: translated.stream,
       temperature: translated.upstreamBody?.options?.temperature ?? 0,
       max_tokens: outputTokens,
-      ...reasoning.controls
+      ...reasoning.controls,
+      ...toolRequest.controls
     };
-    return { path: '/v1/chat/completions', body, responseKind: 'openai', outputTokens, reasoning };
+    return {
+      path: '/v1/chat/completions',
+      body,
+      responseKind: 'openai',
+      outputTokens,
+      reasoning,
+      templateControls
+    };
   }
 
   async validateResponsesContext(prepared) {
-    return await this.validateContext(prepared.body.messages, prepared.outputTokens, prepared.reasoning?.controls);
+    return await this.validateContext(prepared.body.messages, prepared.outputTokens, prepared.templateControls);
   }
 
   async adaptResponsesResponse(response, streaming) {

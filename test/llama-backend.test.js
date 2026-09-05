@@ -76,10 +76,42 @@ function createFakeLlama() {
     if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const prompt = (body?.messages || []).map((message) => String(message.content || '')).join('\n');
       const reasoning = body?.chat_template_kwargs?.enable_thinking === true;
+      const hasToolResult = (body?.messages || []).some((message) => message?.role === 'tool');
+      const requestsToolCall = !hasToolResult && prompt.includes('CALL_TOOL');
       if (prompt.includes('BACKEND_ERROR')) return sendJson(response, 500, { error: { message: 'synthetic backend error' } });
       if (prompt.includes('HOLD')) await hold;
       if (body?.stream) {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (requestsToolCall) {
+          response.write(`data: ${JSON.stringify({
+            id: 'chunk-tool-1',
+            model: body.model,
+            choices: [{
+              index: 0,
+              delta: {
+                role: 'assistant',
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_bash_1',
+                  type: 'function',
+                  function: { name: 'bash', arguments: '{"command":"' }
+                }]
+              },
+              finish_reason: null
+            }]
+          })}\n\n`);
+          response.end(`data: ${JSON.stringify({
+            id: 'chunk-tool-2',
+            model: body.model,
+            choices: [{
+              index: 0,
+              delta: { tool_calls: [{ index: 0, function: { arguments: 'pwd"}' } }] },
+              finish_reason: 'tool_calls'
+            }],
+            usage: { prompt_tokens: 12, completion_tokens: 4 }
+          })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
         response.write(`data: ${JSON.stringify({
           id: 'chunk-1', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', ...(reasoning ? { reasoning_content: 'private reasoning' } : {}), content: 'stream ' }, finish_reason: null }]
         })}\n\n`);
@@ -91,6 +123,27 @@ function createFakeLlama() {
           id: 'chunk-2', model: body.model, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 8, completion_tokens: 2 }
         })}\n\ndata: [DONE]\n\n`);
         return;
+      }
+      if (requestsToolCall) {
+        return sendJson(response, 200, {
+          id: 'completion-tool-1',
+          object: 'chat.completion',
+          model: body.model,
+          choices: [{
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{
+                id: 'call_bash_1',
+                type: 'function',
+                function: { name: 'bash', arguments: '{"command":"pwd"}' }
+              }]
+            },
+            finish_reason: 'tool_calls'
+          }],
+          usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }
+        });
       }
       return sendJson(response, 200, {
         id: 'completion-1',
@@ -122,6 +175,7 @@ async function makeFixture({
   reasoning = false,
   reasoningPolicy = REASONING_POLICY,
   model = PINNED,
+  tools = false,
   unsupportedToolsPolicy = 'passthrough'
 } = {}) {
   const backend = createFakeLlama();
@@ -145,7 +199,7 @@ async function makeFixture({
     capability_profile: {
       prompt_cache_volatile: true,
       prompt_cache_persistence: false,
-      tools: false,
+      tools,
       reasoning
     },
     ...(reasoning ? { reasoning_policy: reasoningPolicy } : {})
@@ -584,6 +638,224 @@ test('llama.cpp applies marker-driven unsupported-tools policy before backend va
     assert.equal(rejecting.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
   } finally {
     await rejecting.cleanup();
+  }
+});
+
+test('llama.cpp marker-enabled tools round-trip through native, Chat Completions, and Responses APIs', async () => {
+  const tools = [{
+    type: 'function',
+    function: {
+      name: 'bash',
+      description: 'Run a shell command.',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string' } },
+        required: ['command']
+      }
+    }
+  }];
+  const fixture = await makeFixture({
+    model: 'orion-tools-synthetic',
+    tools: true,
+    unsupportedToolsPolicy: 'reject'
+  });
+  try {
+    const native = await post(fixture.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'CALL_TOOL using bash.' }],
+      tools,
+      stream: false,
+      options: { num_predict: 128 }
+    });
+    const nativeBody = await native.json();
+    assert.equal(native.status, 200, JSON.stringify(nativeBody));
+    assert.equal(nativeBody.done_reason, 'tool_calls');
+    assert.deepEqual(nativeBody.message.tool_calls, [{
+      id: 'call_bash_1',
+      type: 'function',
+      function: { name: 'bash', arguments: { command: 'pwd' } }
+    }]);
+
+    const nativeFollowUp = await post(fixture.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [
+        { role: 'user', content: 'CALL_TOOL using bash.' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ function: { name: 'bash', arguments: { command: 'pwd' } } }]
+        },
+        { role: 'tool', tool_name: 'bash', content: '/workspace' }
+      ],
+      tools,
+      stream: false,
+      options: { num_predict: 128 }
+    });
+    assert.equal(nativeFollowUp.status, 200);
+    assert.equal((await nativeFollowUp.json()).message.content, 'llama adapter ok');
+
+    const openAi = await post(fixture.apiPort, '/v1/chat/completions', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'CALL_TOOL using bash.' }],
+      tools,
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+      stream: false,
+      max_tokens: 128
+    });
+    const openAiBody = await openAi.json();
+    assert.equal(openAi.status, 200, JSON.stringify(openAiBody));
+    assert.equal(openAiBody.choices[0].finish_reason, 'tool_calls');
+    assert.equal(openAiBody.choices[0].message.tool_calls[0].function.name, 'bash');
+
+    const nativeStreaming = await post(fixture.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'STREAM CALL_TOOL using bash.' }],
+      tools,
+      stream: true,
+      options: { num_predict: 128 }
+    });
+    assert.equal(nativeStreaming.status, 200);
+    const nativeStreamLines = (await nativeStreaming.text()).trim().split('\n').map(JSON.parse);
+    const nativeToolChunk = nativeStreamLines.find((item) => item.message?.tool_calls?.length);
+    assert.deepEqual(nativeToolChunk.message.tool_calls[0], {
+      id: 'call_bash_1',
+      type: 'function',
+      function: { index: 0, name: 'bash', arguments: { command: 'pwd' } }
+    });
+    assert.equal(nativeStreamLines.at(-1).done_reason, 'tool_calls');
+
+    const responsesTools = [{
+      type: 'function',
+      name: 'bash',
+      description: 'Run a shell command.',
+      parameters: tools[0].function.parameters
+    }];
+    const responses = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'CALL_TOOL using bash.',
+      tools: responsesTools,
+      stream: false,
+      store: false,
+      max_output_tokens: 128
+    });
+    const responsesBody = await responses.json();
+    assert.equal(responses.status, 200, JSON.stringify(responsesBody));
+    const functionCall = responsesBody.output.find((item) => item.type === 'function_call');
+    assert.ok(functionCall);
+    assert.equal(functionCall.name, 'bash');
+    assert.equal(functionCall.call_id, 'call_bash_1');
+    assert.equal(functionCall.arguments, '{"command":"pwd"}');
+
+    const responsesFollowUp = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: [
+        { role: 'user', content: 'CALL_TOOL using bash.' },
+        functionCall,
+        { type: 'function_call_output', call_id: functionCall.call_id, output: '/workspace' }
+      ],
+      tools: responsesTools,
+      stream: false,
+      store: false,
+      max_output_tokens: 128
+    });
+    const responsesFollowUpBody = await responsesFollowUp.json();
+    assert.equal(responsesFollowUp.status, 200, JSON.stringify(responsesFollowUpBody));
+    assert.equal(responsesFollowUpBody.output[0].content[0].text, 'llama adapter ok');
+
+    const streaming = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'STREAM CALL_TOOL using bash.',
+      tools: responsesTools,
+      stream: true,
+      store: false,
+      max_output_tokens: 128
+    });
+    assert.equal(streaming.status, 200);
+    const streamingText = await streaming.text();
+    assert.match(streamingText, /response\.function_call_arguments\.done/);
+    assert.match(streamingText, /\\"command\\":\\"pwd\\"/);
+    assert.match(streamingText, /response\.completed/);
+
+    const discovery = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
+    assert.equal(discovery.status, 200);
+    const discoveryEntry = (await discovery.json()).data[0];
+    assert.equal(discoveryEntry.x_ollama_router.upstream_model, 'orion-tools-synthetic');
+    assert.ok(discoveryEntry.x_ollama_router.capabilities.includes('tools'));
+
+    const generationRequests = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generationRequests.length, 7);
+    assert.ok(generationRequests.every((request) => request.body.tools?.[0]?.function?.name === 'bash'));
+    assert.equal(generationRequests[1].body.messages[1].tool_calls[0].id, 'call_router_1_0');
+    assert.equal(generationRequests[1].body.messages[1].tool_calls[0].function.arguments, '{"command":"pwd"}');
+    assert.equal(generationRequests[1].body.messages[2].tool_call_id, 'call_router_1_0');
+    assert.equal(generationRequests[2].body.tool_choice, 'auto');
+    assert.equal(generationRequests[2].body.parallel_tool_calls, false);
+
+    const templateRequests = fixture.backend.requests.filter((request) => request.pathname === '/apply-template');
+    assert.equal(templateRequests.length, 7);
+    assert.ok(templateRequests.every((request) => request.body.tools?.[0]?.function?.name === 'bash'));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp tool validation fails closed before template application or inference', async () => {
+  const fixture = await makeFixture({ tools: true });
+  try {
+    const cases = [
+      {
+        body: {
+          model: 'local-active',
+          messages: [{ role: 'user', content: 'invalid tool' }],
+          tools: [{ type: 'function' }],
+          stream: false
+        },
+        code: 'INVALID_TOOL'
+      },
+      {
+        body: {
+          model: 'local-active',
+          messages: [
+            { role: 'assistant', content: '', tool_calls: [{ function: { name: 'bash', arguments: '{bad' } }] }
+          ],
+          tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }],
+          stream: false
+        },
+        code: 'INVALID_TOOL_ARGUMENTS'
+      },
+      {
+        body: {
+          model: 'local-active',
+          messages: [{ role: 'tool', tool_name: 'bash', content: 'orphan result' }],
+          tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }],
+          stream: false
+        },
+        code: 'INVALID_TOOL_HISTORY'
+      },
+      {
+        body: {
+          model: 'local-active',
+          messages: [{ role: 'user', content: 'unsupported control' }],
+          tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object' } } }],
+          max_tool_calls: 1,
+          stream: false
+        },
+        code: 'UNSUPPORTED_PROFILE_CAPABILITY'
+      }
+    ];
+
+    for (const item of cases) {
+      const response = await post(fixture.apiPort, '/v1/chat/completions', item.body);
+      const payload = await response.json();
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.equal(payload.error.code, item.code);
+    }
+    assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/apply-template').length, 0);
+    assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
+  } finally {
+    await fixture.cleanup();
   }
 });
 
