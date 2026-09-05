@@ -90,6 +90,19 @@ export function emptyToolPolicy(body, unsupportedToolsPolicy) {
   };
 }
 
+export function createToolCapabilityLookup(activeModel, fallback = null) {
+  const supported = activeModel?.capability_profile?.tools;
+  if (typeof supported === 'boolean') {
+    const result = {
+      known: true,
+      capabilities: supported ? ['tools'] : []
+    };
+    return async () => result;
+  }
+  if (typeof fallback === 'function') return fallback;
+  return async () => ({ known: false, capabilities: [] });
+}
+
 export async function normalizeToolsForModel(body, model, unsupportedToolsPolicy, capabilityLookup) {
   const inspected = inspectNativeTools(body);
   const unchanged = {

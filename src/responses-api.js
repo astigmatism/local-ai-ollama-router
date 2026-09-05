@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { readActiveModel } from './active-model.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
 import { createModelCapabilityLookup, normalizeThinkForModel, upstreamFetch } from './upstream.js';
-import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
+import { createToolCapabilityLookup, emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
 import { BackendAdapterError, resolveBackendAdapter } from './backend-adapters.js';
 import { RequestGateError } from './request-gate.js';
 import {
@@ -1104,22 +1104,23 @@ export async function handleResponsesRequest(request, response, pathname, contex
       );
     }
     backend = resolveBackendAdapter(context.config, activeModelInfo);
-    const capabilityLookup = createModelCapabilityLookup(backend.upstreamConfig, activeModelInfo.model);
-    if (backend.kind === 'ollama') {
-      try {
-        toolPolicy = await normalizeToolsForModel(
-          body,
-          activeModelInfo.model,
-          context.config.unsupportedToolsPolicy,
-          capabilityLookup
-        );
-      } catch (error) {
-        if (error.code === 'UNSUPPORTED_TOOLS' || error.code === 'UNSUPPORTED_TOOL_HISTORY') {
-          toolPolicy = { ...toolPolicy, toolsSupported: false };
-          throw new ResponsesApiError(error.statusCode, error.code, error.message, error.param);
-        }
-        throw error;
+    const capabilityLookup = createToolCapabilityLookup(
+      activeModelInfo,
+      createModelCapabilityLookup(backend.upstreamConfig, activeModelInfo.model)
+    );
+    try {
+      toolPolicy = await normalizeToolsForModel(
+        body,
+        activeModelInfo.model,
+        context.config.unsupportedToolsPolicy,
+        capabilityLookup
+      );
+    } catch (error) {
+      if (error.code === 'UNSUPPORTED_TOOLS' || error.code === 'UNSUPPORTED_TOOL_HISTORY') {
+        toolPolicy = { ...toolPolicy, toolsSupported: false };
+        throw new ResponsesApiError(error.statusCode, error.code, error.message, error.param);
       }
+      throw error;
     }
 
     let defaultThink;
@@ -1173,7 +1174,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.toolsSupported = toolPolicy.toolsSupported;
     translated.toolsDropped = toolPolicy.toolsDropped;
     translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
-    translated.originalBody = body;
+    translated.originalBody = toolPolicy.body;
     let backendRequest;
     try {
       // Template application/tokenization is part of an accepted generation

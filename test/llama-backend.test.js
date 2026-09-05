@@ -118,7 +118,12 @@ async function close(server) {
   await closed;
 }
 
-async function makeFixture({ reasoning = false, reasoningPolicy = REASONING_POLICY, model = PINNED } = {}) {
+async function makeFixture({
+  reasoning = false,
+  reasoningPolicy = REASONING_POLICY,
+  model = PINNED,
+  unsupportedToolsPolicy = 'passthrough'
+} = {}) {
   const backend = createFakeLlama();
   const backendPort = await listen(backend.server);
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-llama-test-'));
@@ -140,6 +145,7 @@ async function makeFixture({ reasoning = false, reasoningPolicy = REASONING_POLI
     capability_profile: {
       prompt_cache_volatile: true,
       prompt_cache_persistence: false,
+      tools: false,
       reasoning
     },
     ...(reasoning ? { reasoning_policy: reasoningPolicy } : {})
@@ -158,6 +164,7 @@ async function makeFixture({ reasoning = false, reasoningPolicy = REASONING_POLI
       ROUTER_CONTROL_FILE: path.join(dir, 'router-control.json'),
       ROUTER_MODEL_ALIAS: 'local-active',
       REWRITE_REQUESTED_MODEL_TO_ACTIVE: 'true',
+      UNSUPPORTED_TOOLS_POLICY: unsupportedToolsPolicy,
       ADMIN_TOKEN: 'secret-token',
       DATA_DIR: dir,
       ENABLE_NVIDIA_SMI: 'false'
@@ -488,6 +495,95 @@ test('native reasoning compatibility caps downward, emits an audit event, and re
     assert.equal(belowUpstream.max_tokens, 12000);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test('llama.cpp applies marker-driven unsupported-tools policy before backend validation', async () => {
+  const tools = [{
+    type: 'function',
+    function: {
+      name: 'lookup_weather',
+      description: 'Look up the weather.',
+      parameters: { type: 'object', properties: { city: { type: 'string' } } }
+    }
+  }];
+  const dropping = await makeFixture({
+    reasoning: true,
+    unsupportedToolsPolicy: 'drop'
+  });
+  try {
+    const response = await post(dropping.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'Do not call tools; answer directly.' }],
+      stream: false,
+      think: true,
+      tools,
+      options: { reasoning_effort: 'xhigh', num_predict: 256 }
+    });
+    const responsePayload = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(responsePayload));
+
+    const upstream = dropping.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions')
+      .at(-1).body;
+    assert.equal(Object.hasOwn(upstream, 'tools'), false);
+    assert.equal(upstream.max_tokens, 256);
+
+    const event = await waitForEvent(dropping, (item) => item.type === 'unsupported_tools_dropped');
+    assert.equal(event.toolsPresent, true);
+    assert.equal(event.toolCount, 1);
+    assert.equal(event.toolsSupported, false);
+    assert.equal(event.unsupportedToolsPolicy, 'drop');
+
+    const openAiResponse = await post(dropping.apiPort, '/v1/chat/completions', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'Answer without tools.' }],
+      stream: false,
+      tools,
+      max_tokens: 128
+    });
+    assert.equal(openAiResponse.status, 200);
+
+    const responsesResponse = await post(dropping.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'Answer without tools.',
+      stream: false,
+      store: false,
+      tools: [{
+        type: 'function',
+        name: 'lookup_weather',
+        description: 'Look up the weather.',
+        parameters: { type: 'object', properties: { city: { type: 'string' } } }
+      }],
+      max_output_tokens: 128
+    });
+    assert.equal(responsesResponse.status, 200);
+
+    const generationRequests = dropping.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generationRequests.length, 3);
+    assert.ok(generationRequests.every((request) => !Object.hasOwn(request.body, 'tools')));
+    await waitForEvent(dropping, (item) => item.type === 'unsupported_tools_dropped'
+      && item.endpoint === '/v1/chat/completions');
+    await waitForEvent(dropping, (item) => item.type === 'unsupported_tools_dropped'
+      && item.endpoint === '/v1/responses');
+  } finally {
+    await dropping.cleanup();
+  }
+
+  const rejecting = await makeFixture({ unsupportedToolsPolicy: 'reject' });
+  try {
+    const response = await post(rejecting.apiPort, '/api/chat', {
+      model: 'local-active',
+      messages: [{ role: 'user', content: 'TOOLS_REJECTED' }],
+      stream: false,
+      tools
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, 'UNSUPPORTED_TOOLS');
+    assert.equal(rejecting.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
+  } finally {
+    await rejecting.cleanup();
   }
 });
 

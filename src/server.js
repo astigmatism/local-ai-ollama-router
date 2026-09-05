@@ -21,7 +21,7 @@ import {
   upstreamJson
 } from './upstream.js';
 import { resolveDefaultThink, thinkLevelToReasoningEffort } from './reasoning.js';
-import { emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
+import { createToolCapabilityLookup, emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
 import {
   BackendAdapterError,
   fetchPrepared,
@@ -692,14 +692,17 @@ async function handleProxy(request, response, url, context) {
       && typeof bodyWithThinkDefault === 'object'
       && !Array.isArray(bodyWithThinkDefault)
       && !Object.hasOwn(bodyWithThinkDefault, 'think');
-    const capabilityLookup = createModelCapabilityLookup(backend.upstreamConfig, policy.forwardedModel);
+    const capabilityLookup = createToolCapabilityLookup(
+      activeModel,
+      createModelCapabilityLookup(backend.upstreamConfig, policy.forwardedModel)
+    );
     try {
       if (backend.kind === 'ollama' && canApplyThinkDefault) {
         let defaultThink;
         defaultThink = resolveDefaultThink(activeModel, context.config);
         if (defaultThink !== undefined) bodyWithThinkDefault = { ...bodyWithThinkDefault, think: defaultThink };
       }
-      if (backend.kind === 'ollama' && normalizesTools) {
+      if (normalizesTools) {
         toolPolicy = await normalizeToolsForModel(
           bodyWithThinkDefault,
           policy.forwardedModel,
