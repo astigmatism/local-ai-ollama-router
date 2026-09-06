@@ -419,7 +419,7 @@ test('streamed malformed llama.cpp tool arguments preserve their code and value-
       argumentBytes: Buffer.byteLength(malformedArguments),
       argumentSha256: createHash('sha256').update(malformedArguments).digest('hex'),
       jsonErrorCategory: 'unexpected_end',
-      jsonErrorOffset: null,
+      jsonErrorOffset: malformedArguments.length,
       finishReason: 'length',
       completionTokens: 128,
       requestedOutputTokens: 128,

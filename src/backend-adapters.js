@@ -818,14 +818,69 @@ function completionUsage(payload) {
   };
 }
 
-function normalizedJsonError(error) {
+function invalidJsonLiteralOffset(value) {
+  const literals = new Map([['t', 'true'], ['f', 'false'], ['n', 'null']]);
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    const literal = literals.get(character);
+    if (literal) {
+      for (let offset = 0; offset < literal.length; offset += 1) {
+        if (value[index + offset] !== literal[offset]) return index + offset;
+      }
+      index += literal.length - 1;
+      continue;
+    }
+    if (/[A-DF-Za-df-z_]/.test(character)) return index;
+  }
+  return null;
+}
+
+function jsonAppearsIncomplete(value) {
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (const character of value) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === '{' || character === '[') stack.push(character);
+    else if (character === '}' && stack.at(-1) === '{') stack.pop();
+    else if (character === ']' && stack.at(-1) === '[') stack.pop();
+  }
+  if (inString || stack.length > 0) return true;
+  const trimmed = value.trimEnd();
+  return /[:,]$/.test(trimmed) || /(?:^|[\s:[,{])(?:tru|fals|nul|-?\d+(?:\.\d*)?(?:[eE][+-]?)?)$/.test(trimmed);
+}
+
+function normalizedJsonError(error, value) {
   const message = String(error?.message || '');
   const offsetMatch = /(?:at position|position)\s+(\d+)/i.exec(message);
+  const literalOffset = invalidJsonLiteralOffset(value);
+  const unexpectedEnd = literalOffset === null && jsonAppearsIncomplete(value);
   return {
-    jsonErrorCategory: /unexpected end|unterminated|end of (?:json|data|input)/i.test(message)
-      ? 'unexpected_end'
-      : 'invalid_syntax',
-    jsonErrorOffset: offsetMatch ? Number(offsetMatch[1]) : null
+    jsonErrorCategory: unexpectedEnd ? 'unexpected_end' : 'invalid_syntax',
+    jsonErrorOffset: unexpectedEnd
+      ? value.length
+      : (offsetMatch ? Number(offsetMatch[1]) : literalOffset)
   };
 }
 
@@ -859,7 +914,7 @@ function openAiToolCallsToOllama(rawToolCalls, diagnosticsByIndex = null) {
           'MALFORMED_UPSTREAM_TOOL_ARGUMENTS',
           'llama.cpp returned malformed function arguments.',
           null,
-          diagnostics ? { ...diagnostics, ...normalizedJsonError(error) } : null
+          diagnostics ? { ...diagnostics, ...normalizedJsonError(error, call.function.arguments) } : null
         );
       }
     }

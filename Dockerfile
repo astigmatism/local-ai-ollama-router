@@ -12,6 +12,7 @@ ENV NODE_ENV=production \
 
 COPY package.json ./
 COPY src ./src
+COPY test ./test
 COPY public ./public
 COPY docs ./docs
 COPY runtime ./runtime
