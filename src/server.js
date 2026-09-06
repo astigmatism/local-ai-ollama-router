@@ -1126,6 +1126,7 @@ async function handleResponses(request, response, url, context) {
       type: 'responses_upstream_failed',
       code: outcome.errorCode,
       message: outcome.errorSummary,
+      ...(outcome.errorDiagnostics ? { diagnostics: outcome.errorDiagnostics } : {}),
       endpoint: url.pathname,
       model: outcome.forwardedModel,
       clientIdentity: record.clientIdentity,

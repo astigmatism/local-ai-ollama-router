@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { TextDecoder, TextEncoder } from 'node:util';
 import { upstreamFetch, upstreamJson } from './upstream.js';
 
@@ -5,14 +6,16 @@ const encoder = new TextEncoder();
 const LLAMA_CPP_KIND = 'llama_cpp';
 const OLLAMA_KIND = 'ollama';
 const SAFE_POLICY_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
+const MAX_TOOL_ARGUMENT_DIAGNOSTIC_DELTAS = 64;
 
 export class BackendAdapterError extends Error {
-  constructor(statusCode, code, message, param = null) {
+  constructor(statusCode, code, message, param = null, diagnostics = null) {
     super(message);
     this.name = 'BackendAdapterError';
     this.statusCode = statusCode;
     this.code = code;
     this.param = param;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -815,7 +818,18 @@ function completionUsage(payload) {
   };
 }
 
-function openAiToolCallsToOllama(rawToolCalls) {
+function normalizedJsonError(error) {
+  const message = String(error?.message || '');
+  const offsetMatch = /(?:at position|position)\s+(\d+)/i.exec(message);
+  return {
+    jsonErrorCategory: /unexpected end|unterminated|end of (?:json|data|input)/i.test(message)
+      ? 'unexpected_end'
+      : 'invalid_syntax',
+    jsonErrorOffset: offsetMatch ? Number(offsetMatch[1]) : null
+  };
+}
+
+function openAiToolCallsToOllama(rawToolCalls, diagnosticsByIndex = null) {
   if (rawToolCalls === undefined || rawToolCalls === null) return [];
   if (!Array.isArray(rawToolCalls)) {
     throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_CALL', 'llama.cpp returned malformed function calls.');
@@ -837,8 +851,16 @@ function openAiToolCallsToOllama(rawToolCalls) {
     if (typeof args === 'string') {
       try {
         args = JSON.parse(args);
-      } catch {
-        throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS', 'llama.cpp returned malformed function arguments.');
+      } catch (error) {
+        const toolIndex = Number.isInteger(call.function.index) ? call.function.index : index;
+        const diagnostics = diagnosticsByIndex?.get(toolIndex);
+        throw new BackendAdapterError(
+          502,
+          'MALFORMED_UPSTREAM_TOOL_ARGUMENTS',
+          'llama.cpp returned malformed function arguments.',
+          null,
+          diagnostics ? { ...diagnostics, ...normalizedJsonError(error) } : null
+        );
       }
     }
     if (!isPlainObject(args)) {
@@ -898,13 +920,43 @@ function dataLines(frame) {
     .join('\n');
 }
 
-export function openAiSseToOllamaStream(readable, { kind, model, usageState = {} }) {
+export function openAiSseToOllamaStream(readable, {
+  kind,
+  model,
+  usageState = {},
+  requestedOutputTokens = null
+}) {
   const decoder = new TextDecoder();
   let buffer = '';
   let doneSent = false;
   let lastPayload = null;
   let toolsSent = false;
   const pendingToolCalls = new Map();
+  const termination = {
+    finishReason: null,
+    completionTokens: null,
+    requestedOutputTokens: positiveInteger(requestedOutputTokens)
+  };
+
+  const toolDiagnostics = (pending) => {
+    const argumentsText = pending.arguments || '{}';
+    return {
+      toolIndex: pending.index,
+      toolName: pending.name,
+      toolCallIdPresent: Boolean(pending.id),
+      argumentDeltaCount: pending.argumentDeltaCount,
+      argumentDeltaTypes: pending.argumentDeltaTypes,
+      argumentDeltaTypesTruncated: pending.argumentDeltaTypesTruncated,
+      argumentBytes: encoder.encode(argumentsText).byteLength,
+      argumentSha256: createHash('sha256').update(argumentsText).digest('hex'),
+      finishReason: termination.finishReason,
+      completionTokens: termination.completionTokens,
+      requestedOutputTokens: termination.requestedOutputTokens,
+      outputLimitReached: termination.completionTokens !== null && termination.requestedOutputTokens !== null
+        ? termination.completionTokens >= termination.requestedOutputTokens
+        : null
+    };
+  };
 
   const recordToolDeltas = (rawToolCalls) => {
     if (rawToolCalls === undefined) return;
@@ -918,7 +970,16 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
       const index = Number.isInteger(call.index) ? call.index : position;
       let pending = pendingToolCalls.get(index);
       if (!pending) {
-        pending = { index, id: null, type: 'function', name: null, arguments: '' };
+        pending = {
+          index,
+          id: null,
+          type: 'function',
+          name: null,
+          arguments: '',
+          argumentDeltaCount: 0,
+          argumentDeltaTypes: [],
+          argumentDeltaTypesTruncated: false
+        };
         pendingToolCalls.set(index, pending);
       }
       if (call.id !== undefined) {
@@ -942,6 +1003,12 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
           pending.name = call.function.name;
         }
         if (call.function.arguments !== undefined) {
+          pending.argumentDeltaCount += 1;
+          if (pending.argumentDeltaTypes.length < MAX_TOOL_ARGUMENT_DIAGNOSTIC_DELTAS) {
+            pending.argumentDeltaTypes.push(Array.isArray(call.function.arguments) ? 'array' : typeof call.function.arguments);
+          } else {
+            pending.argumentDeltaTypesTruncated = true;
+          }
           if (typeof call.function.arguments === 'string') {
             pending.arguments += call.function.arguments;
           } else if (isPlainObject(call.function.arguments) && !pending.arguments) {
@@ -963,7 +1030,10 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
         type: 'function',
         function: { index: call.index, name: call.name, arguments: call.arguments || '{}' }
       }));
-    const toolCalls = openAiToolCallsToOllama(calls);
+    const diagnosticsByIndex = new Map(
+      [...pendingToolCalls.values()].map((pending) => [pending.index, toolDiagnostics(pending)])
+    );
+    const toolCalls = openAiToolCallsToOllama(calls, diagnosticsByIndex);
     controller.enqueue(encoder.encode(`${JSON.stringify({
       model,
       created_at: new Date().toISOString(),
@@ -1003,6 +1073,9 @@ export function openAiSseToOllamaStream(readable, { kind, model, usageState = {}
     lastPayload = payload;
     if (payload.usage) usageState.usage = payload.usage;
     const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
+    if (choice?.finish_reason) termination.finishReason = choice.finish_reason;
+    const completionTokens = nonNegativeInteger(payload?.usage?.completion_tokens);
+    if (completionTokens !== null) termination.completionTokens = completionTokens;
     const content = choice?.delta?.content ?? choice?.text ?? '';
     const thinking = typeof choice?.delta?.reasoning_content === 'string' ? choice.delta.reasoning_content : '';
     recordToolDeltas(choice?.delta?.tool_calls);
@@ -1399,7 +1472,7 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     return await this.validateContext(prepared.body.messages, prepared.outputTokens, prepared.templateControls);
   }
 
-  async adaptResponsesResponse(response, streaming) {
+  async adaptResponsesResponse(response, streaming, prepared = null) {
     if (!response.ok) return response;
     if (!streaming) {
       const payload = JSON.parse(await response.text());
@@ -1411,7 +1484,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     }
     return new Response(openAiSseToOllamaStream(response.body, {
       kind: 'native-chat',
-      model: this.activeModel.model
+      model: this.activeModel.model,
+      requestedOutputTokens: prepared?.outputTokens
     }), {
       status: response.status,
       headers: { 'content-type': 'application/x-ndjson' }

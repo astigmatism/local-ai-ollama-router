@@ -31,6 +31,8 @@ PROMPT_LOGGING=metadata
 
 This records lengths and counts, not full prompt text. Safer options:
 
+Malformed streamed llama.cpp tool arguments add value-free failure diagnostics to the request and event logs even in metadata mode. These diagnostics contain structural delta types, byte length, SHA-256, parser category/offset, termination metadata, and the tool name, but never the argument text or tool schema.
+
 ```env
 PROMPT_LOGGING=off
 ```

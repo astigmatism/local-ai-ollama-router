@@ -16,14 +16,26 @@ const RESPONSES_PATHS = new Set(['/v1/responses', '/responses']);
 const MESSAGE_ROLES = new Set(['user', 'assistant', 'system', 'developer']);
 
 export class ResponsesApiError extends Error {
-  constructor(statusCode, code, message, param = null, type = 'invalid_request_error') {
+  constructor(statusCode, code, message, param = null, type = 'invalid_request_error', diagnostics = null) {
     super(message);
     this.name = 'ResponsesApiError';
     this.statusCode = statusCode;
     this.code = code;
     this.param = param;
     this.type = type;
+    this.diagnostics = diagnostics;
   }
+}
+
+function backendErrorToResponsesError(error) {
+  return new ResponsesApiError(
+    error.statusCode,
+    error.code,
+    error.message,
+    error.param,
+    error.statusCode >= 500 ? 'server_error' : 'invalid_request_error',
+    error.diagnostics
+  );
 }
 
 export function isResponsesPath(pathname) {
@@ -1215,6 +1227,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       if (backend.validateResponsesContext) await backend.validateResponsesContext(backendRequest);
     } catch (error) {
       if (error instanceof BackendAdapterError || error instanceof RequestGateError) {
+        if (error instanceof BackendAdapterError) throw backendErrorToResponsesError(error);
         throw new ResponsesApiError(
           error.statusCode,
           error.code,
@@ -1300,7 +1313,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       throw apiError;
     }
 
-    upstreamResponse = await backend.adaptResponsesResponse(upstreamResponse, translated.stream);
+    upstreamResponse = await backend.adaptResponsesResponse(upstreamResponse, translated.stream, backendRequest);
 
     if (!upstreamResponse.ok) {
       const upstreamMessage = await readUpstreamError(upstreamResponse);
@@ -1388,9 +1401,11 @@ export async function handleResponsesRequest(request, response, pathname, contex
       }
       const apiError = error instanceof ResponsesApiError
         ? error
-        : (abortState.timedOut()
-          ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for the active backend.', null, 'server_error')
-          : new ResponsesApiError(502, 'UPSTREAM_STREAM_FAILED', error.message, null, 'server_error'));
+        : (error instanceof BackendAdapterError
+          ? backendErrorToResponsesError(error)
+          : (abortState.timedOut()
+            ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for the active backend.', null, 'server_error')
+            : new ResponsesApiError(502, 'UPSTREAM_STREAM_FAILED', error.message, null, 'server_error')));
       await endFailedStream(builder, writer, apiError);
       return {
         ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
@@ -1401,6 +1416,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
         upstreamError: true,
         errorCode: apiError.code,
         errorSummary: apiError.message,
+        ...(apiError.diagnostics ? { errorDiagnostics: apiError.diagnostics } : {}),
         usage: null,
         responseBytes: writer.bytes
       };
@@ -1408,9 +1424,11 @@ export async function handleResponsesRequest(request, response, pathname, contex
   } catch (error) {
     const apiError = error instanceof ResponsesApiError
       ? error
-      : (abortState?.timedOut()
-        ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
-        : new ResponsesApiError(500, 'INTERNAL_ERROR', error.message || 'Unexpected Responses adapter error.', null, 'server_error'));
+      : (error instanceof BackendAdapterError
+        ? backendErrorToResponsesError(error)
+        : (abortState?.timedOut()
+          ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
+          : new ResponsesApiError(500, 'INTERNAL_ERROR', error.message || 'Unexpected Responses adapter error.', null, 'server_error')));
     if (!response.headersSent && !response.destroyed) sendJson(response, apiError.statusCode, responsesErrorPayload(apiError));
     return {
       ...outcomeBase(started, pathname, body, activeModelInfo?.model ?? null, translated, toolPolicy),
@@ -1428,6 +1446,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       ].includes(apiError.code),
       errorCode: apiError.code,
       errorSummary: apiError.message,
+      ...(apiError.diagnostics ? { errorDiagnostics: apiError.diagnostics } : {}),
       usage: null,
       responseBytes: 0
     };

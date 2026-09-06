@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -82,6 +83,40 @@ function createFakeLlama() {
       if (prompt.includes('HOLD')) await hold;
       if (body?.stream) {
         response.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (prompt.includes('MALFORMED_STREAM_TOOL')) {
+          const invalidSyntax = prompt.includes('MALFORMED_STREAM_TOOL_SYNTAX');
+          const firstArguments = invalidSyntax ? '{"questions":' : '{"questions":[';
+          const secondArguments = invalidSyntax ? 'not-json}' : '{"id":"width"';
+          response.write(`data: ${JSON.stringify({
+            id: 'chunk-malformed-tool-1',
+            model: body.model,
+            choices: [{
+              index: 0,
+              delta: {
+                role: 'assistant',
+                reasoning_content: 'I should ask the user.',
+                tool_calls: [{
+                  index: 0,
+                  id: 'call_question_1',
+                  type: 'function',
+                  function: { name: 'ask_user_question', arguments: firstArguments }
+                }]
+              },
+              finish_reason: null
+            }]
+          })}\n\n`);
+          response.end(`data: ${JSON.stringify({
+            id: 'chunk-malformed-tool-2',
+            model: body.model,
+            choices: [{
+              index: 0,
+              delta: { tool_calls: [{ index: 0, function: { arguments: secondArguments } }] },
+              finish_reason: invalidSyntax ? 'tool_calls' : 'length'
+            }],
+            usage: { prompt_tokens: 12, completion_tokens: invalidSyntax ? 17 : body.max_tokens }
+          })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
         if (requestsToolCall) {
           response.write(`data: ${JSON.stringify({
             id: 'chunk-tool-1',
@@ -248,6 +283,14 @@ function post(port, pathname, body) {
   });
 }
 
+function parseSse(text) {
+  return text
+    .split(/\n\n/)
+    .flatMap((frame) => frame.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()))
+    .filter((data) => data && data !== '[DONE]')
+    .map(JSON.parse);
+}
+
 async function runtimeState(fixture) {
   const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/runtime-state`, {
     headers: { 'x-admin-token': 'secret-token' }
@@ -335,6 +378,93 @@ test('llama.cpp adapter translates streaming native and Responses output with te
     assert.match(sse, /response\.completed/);
     assert.match(sse, /stream ok/);
     assert.equal((await runtimeState(fixture)).runtime.active_count, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('streamed malformed llama.cpp tool arguments preserve their code and value-free diagnostics', async () => {
+  const fixture = await makeFixture({ tools: true });
+  try {
+    const response = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'MALFORMED_STREAM_TOOL',
+      stream: true,
+      store: false,
+      max_output_tokens: 128,
+      tools: [{
+        type: 'function',
+        name: 'ask_user_question',
+        parameters: { type: 'object', properties: { questions: { type: 'array' } } }
+      }]
+    });
+    assert.equal(response.status, 200);
+    const events = parseSse(await response.text());
+    assert.equal(events.at(-1).type, 'response.failed');
+    assert.equal(events.at(-1).response.error.code, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS');
+
+    const event = await waitForEvent(
+      fixture,
+      (entry) => entry.type === 'responses_upstream_failed'
+        && entry.code === 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS'
+    );
+    const malformedArguments = '{"questions":[{"id":"width"';
+    assert.deepEqual(event.diagnostics, {
+      toolIndex: 0,
+      toolName: 'ask_user_question',
+      toolCallIdPresent: true,
+      argumentDeltaCount: 2,
+      argumentDeltaTypes: ['string', 'string'],
+      argumentDeltaTypesTruncated: false,
+      argumentBytes: Buffer.byteLength(malformedArguments),
+      argumentSha256: createHash('sha256').update(malformedArguments).digest('hex'),
+      jsonErrorCategory: 'unexpected_end',
+      jsonErrorOffset: null,
+      finishReason: 'length',
+      completionTokens: 128,
+      requestedOutputTokens: 128,
+      outputLimitReached: true
+    });
+    assert.doesNotMatch(JSON.stringify(event), /questions|width/);
+
+    const record = fixture.context.store.recentRequests(20)
+      .find((entry) => entry.endpoint === '/v1/responses' && entry.upstreamError);
+    assert.equal(record.errorCode, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS');
+    assert.deepEqual(record.errorDiagnostics, event.diagnostics);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('malformed tool diagnostics distinguish invalid syntax from output-limit truncation', async () => {
+  const fixture = await makeFixture({ tools: true });
+  try {
+    const response = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'MALFORMED_STREAM_TOOL_SYNTAX',
+      stream: true,
+      store: false,
+      max_output_tokens: 128,
+      tools: [{
+        type: 'function',
+        name: 'ask_user_question',
+        parameters: { type: 'object', properties: { questions: { type: 'array' } } }
+      }]
+    });
+    const events = parseSse(await response.text());
+    assert.equal(events.at(-1).response.error.code, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS');
+
+    const event = await waitForEvent(
+      fixture,
+      (entry) => entry.type === 'responses_upstream_failed'
+        && entry.code === 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS'
+    );
+    assert.equal(event.diagnostics.jsonErrorCategory, 'invalid_syntax');
+    assert.equal(event.diagnostics.jsonErrorOffset, 14);
+    assert.equal(event.diagnostics.finishReason, 'tool_calls');
+    assert.equal(event.diagnostics.completionTokens, 17);
+    assert.equal(event.diagnostics.outputLimitReached, false);
+    assert.doesNotMatch(JSON.stringify(event), /not-json/);
   } finally {
     await fixture.cleanup();
   }
