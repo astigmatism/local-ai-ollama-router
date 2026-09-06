@@ -984,7 +984,7 @@ export function openAiSseToOllamaStream(readable, {
   const decoder = new TextDecoder();
   let buffer = '';
   let doneSent = false;
-  let lastPayload = null;
+  let lastTimings = null;
   let toolsSent = false;
   const pendingToolCalls = new Map();
   const termination = {
@@ -1098,25 +1098,31 @@ export function openAiSseToOllamaStream(readable, {
     toolsSent = true;
   };
 
+  const emitFinal = (controller) => {
+    if (doneSent) return;
+    // With include_usage, llama.cpp reports counts in a choices:[] trailer
+    // after the finish_reason chunk, so [DONE] is the safe finalization point.
+    emitPendingTools(controller);
+    const usage = usageState.usage;
+    const finalPayload = {
+      model,
+      created_at: new Date().toISOString(),
+      ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
+      done: true,
+      done_reason: termination.finishReason || 'stop',
+      prompt_eval_count: positiveInteger(usage?.prompt_tokens, 0),
+      eval_count: positiveInteger(usage?.completion_tokens, 0),
+      ...(lastTimings ? { timings: lastTimings } : {})
+    };
+    controller.enqueue(encoder.encode(`${JSON.stringify(finalPayload)}\n`));
+    doneSent = true;
+  };
+
   const convertFrame = (frame, controller) => {
     const data = dataLines(frame);
     if (!data) return;
     if (data === '[DONE]') {
-      if (!doneSent) {
-        emitPendingTools(controller);
-        const finalPayload = {
-          model,
-          created_at: new Date().toISOString(),
-          ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
-          done: true,
-          done_reason: lastPayload?.choices?.[0]?.finish_reason || 'stop',
-          prompt_eval_count: positiveInteger(lastPayload?.usage?.prompt_tokens, 0),
-          eval_count: positiveInteger(lastPayload?.usage?.completion_tokens, 0),
-          ...(lastPayload?.timings ? { timings: lastPayload.timings } : {})
-        };
-        controller.enqueue(encoder.encode(`${JSON.stringify(finalPayload)}\n`));
-        doneSent = true;
-      }
+      emitFinal(controller);
       return;
     }
     let payload;
@@ -1125,8 +1131,8 @@ export function openAiSseToOllamaStream(readable, {
     } catch {
       throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_STREAM', 'llama.cpp returned malformed SSE JSON.');
     }
-    lastPayload = payload;
     if (payload.usage) usageState.usage = payload.usage;
+    if (payload.timings) lastTimings = payload.timings;
     const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
     if (choice?.finish_reason) termination.finishReason = choice.finish_reason;
     const completionTokens = nonNegativeInteger(payload?.usage?.completion_tokens);
@@ -1150,21 +1156,6 @@ export function openAiSseToOllamaStream(readable, {
         done: false
       };
       controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
-    }
-    if (choice?.finish_reason && !doneSent) {
-      emitPendingTools(controller);
-      const finalPayload = {
-        model,
-        created_at: new Date().toISOString(),
-        ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
-        done: true,
-        done_reason: choice.finish_reason,
-        prompt_eval_count: positiveInteger(payload?.usage?.prompt_tokens, 0),
-        eval_count: positiveInteger(payload?.usage?.completion_tokens, 0),
-        ...(payload?.timings ? { timings: payload.timings } : {})
-      };
-      controller.enqueue(encoder.encode(`${JSON.stringify(finalPayload)}\n`));
-      doneSent = true;
     }
   };
 
@@ -1458,6 +1449,7 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       model: this.activeModel.model,
       messages: mappedMessages,
       stream: body?.stream !== false,
+      ...(body?.stream === false ? {} : { stream_options: { include_usage: true } }),
       temperature: Number.isFinite(temperature) ? temperature : 0,
       max_tokens: outputTokens,
       ...reasoning.controls,
@@ -1508,6 +1500,7 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       model: this.activeModel.model,
       messages,
       stream: translated.stream,
+      ...(translated.stream ? { stream_options: { include_usage: true } } : {}),
       temperature: translated.upstreamBody?.options?.temperature ?? 0,
       max_tokens: outputTokens,
       ...reasoning.controls,

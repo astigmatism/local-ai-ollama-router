@@ -154,9 +154,15 @@ function createFakeLlama() {
           request.once('close', () => { state.cancelled = true; });
           return;
         }
-        response.end(`data: ${JSON.stringify({
-          id: 'chunk-2', model: body.model, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 8, completion_tokens: 2 }
-        })}\n\ndata: [DONE]\n\n`);
+        response.write(`data: ${JSON.stringify({
+          id: 'chunk-2', model: body.model, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }]
+        })}\n\n`);
+        if (body?.stream_options?.include_usage === true) {
+          response.write(`data: ${JSON.stringify({
+            id: 'chunk-usage', model: body.model, choices: [], usage: { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 }
+          })}\n\n`);
+        }
+        response.end('data: [DONE]\n\n');
         return;
       }
       if (requestsToolCall) {
@@ -369,6 +375,8 @@ test('llama.cpp adapter translates streaming native and Responses output with te
     const ndjson = (await native.text()).trim().split('\n').map(JSON.parse);
     assert.equal(ndjson.filter((entry) => entry.done).length, 1);
     assert.equal(ndjson.filter((entry) => !entry.done).map((entry) => entry.message.content).join(''), 'stream ok');
+    assert.equal(ndjson.at(-1).prompt_eval_count, 8);
+    assert.equal(ndjson.at(-1).eval_count, 2);
 
     const responses = await post(fixture.apiPort, '/v1/responses', {
       model: 'local-active', input: 'STREAM_RESPONSES', stream: true, store: false, max_output_tokens: 32
@@ -377,6 +385,18 @@ test('llama.cpp adapter translates streaming native and Responses output with te
     const sse = await responses.text();
     assert.match(sse, /response\.completed/);
     assert.match(sse, /stream ok/);
+    const completed = parseSse(sse).find((event) => event.type === 'response.completed');
+    assert.deepEqual(completed.response.usage, {
+      input_tokens: 8,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 2,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 10
+    });
+    const streamedRequests = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions' && request.body.stream);
+    assert.equal(streamedRequests.length, 2);
+    assert.ok(streamedRequests.every((request) => request.body.stream_options?.include_usage === true));
     assert.equal((await runtimeState(fixture)).runtime.active_count, 0);
   } finally {
     await fixture.cleanup();

@@ -200,6 +200,28 @@ test('converts chunked SSE including a final partial line to Ollama NDJSON', asy
   assert.equal(lines.at(-1).model, 'pinned');
 });
 
+test('waits for a streaming usage trailer before emitting the final Ollama object', async () => {
+  const input = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(
+        'data: {"model":"wrong","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+      ));
+      controller.enqueue(new TextEncoder().encode(
+        'data: {"model":"wrong","choices":[],"usage":{"prompt_tokens":37,"completion_tokens":5,"total_tokens":42}}\n\n'
+      ));
+      controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      controller.close();
+    }
+  });
+
+  const text = await streamText(openAiSseToOllamaStream(input, { kind: 'native-chat', model: 'pinned' }));
+  const lines = text.trim().split('\n').map(JSON.parse);
+  assert.equal(lines.filter((line) => line.done).length, 1);
+  assert.equal(lines.at(-1).done_reason, 'stop');
+  assert.equal(lines.at(-1).prompt_eval_count, 37);
+  assert.equal(lines.at(-1).eval_count, 5);
+});
+
 test('normalizes model identity in OpenAI streaming frames', async () => {
   const input = new ReadableStream({
     start(controller) {
