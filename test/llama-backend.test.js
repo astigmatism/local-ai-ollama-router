@@ -403,7 +403,7 @@ test('llama.cpp adapter translates streaming native and Responses output with te
   }
 });
 
-test('streamed malformed llama.cpp tool arguments preserve their code and value-free diagnostics', async () => {
+test('streamed llama.cpp tool arguments truncated at the output limit produce an incomplete response', async () => {
   const fixture = await makeFixture({ tools: true });
   try {
     const response = await post(fixture.apiPort, '/v1/responses', {
@@ -420,13 +420,16 @@ test('streamed malformed llama.cpp tool arguments preserve their code and value-
     });
     assert.equal(response.status, 200);
     const events = parseSse(await response.text());
-    assert.equal(events.at(-1).type, 'response.failed');
-    assert.equal(events.at(-1).response.error.code, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS');
+    assert.equal(events.at(-1).type, 'response.incomplete');
+    assert.equal(events.at(-1).response.status, 'incomplete');
+    assert.equal(events.at(-1).response.error, null);
+    assert.deepEqual(events.at(-1).response.incomplete_details, { reason: 'max_output_tokens' });
+    assert.equal(events.at(-1).response.output.some((item) => item.type === 'function_call'), false);
 
     const event = await waitForEvent(
       fixture,
-      (entry) => entry.type === 'responses_upstream_failed'
-        && entry.code === 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS'
+      (entry) => entry.type === 'responses_incomplete'
+        && entry.reason === 'max_output_tokens'
     );
     const malformedArguments = '{"questions":[{"id":"width"';
     assert.deepEqual(event.diagnostics, {
@@ -448,9 +451,10 @@ test('streamed malformed llama.cpp tool arguments preserve their code and value-
     assert.doesNotMatch(JSON.stringify(event), /questions|width/);
 
     const record = fixture.context.store.recentRequests(20)
-      .find((entry) => entry.endpoint === '/v1/responses' && entry.upstreamError);
-    assert.equal(record.errorCode, 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS');
-    assert.deepEqual(record.errorDiagnostics, event.diagnostics);
+      .find((entry) => entry.endpoint === '/v1/responses' && entry.incomplete);
+    assert.equal(record.upstreamError, false);
+    assert.equal(record.incompleteReason, 'max_output_tokens');
+    assert.deepEqual(record.incompleteDiagnostics, event.diagnostics);
   } finally {
     await fixture.cleanup();
   }

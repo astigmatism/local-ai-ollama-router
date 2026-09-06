@@ -951,6 +951,15 @@ class StreamingResponseBuilder {
     await this.writer.event('response.completed', { response: completed });
     return completed;
   }
+
+  async incomplete(reason) {
+    await this.finishReasoning();
+    const incomplete = this.shell('incomplete');
+    incomplete.incomplete_details = { reason };
+    incomplete.usage = null;
+    await this.writer.event('response.incomplete', { response: incomplete });
+    return incomplete;
+  }
 }
 
 async function endFailedStream(builder, writer, apiError) {
@@ -958,6 +967,20 @@ async function endFailedStream(builder, writer, apiError) {
   failed.error = { code: apiError.code, message: apiError.message };
   await writer.event('response.failed', { response: failed });
   writer.end();
+}
+
+async function endIncompleteStream(builder, writer, reason) {
+  const incomplete = await builder.incomplete(reason);
+  writer.end();
+  return incomplete;
+}
+
+function isOutputLimitToolArgumentTruncation(error) {
+  return error instanceof BackendAdapterError
+    && error.code === 'MALFORMED_UPSTREAM_TOOL_ARGUMENTS'
+    && error.diagnostics?.jsonErrorCategory === 'unexpected_end'
+    && error.diagnostics?.finishReason === 'length'
+    && error.diagnostics?.outputLimitReached === true;
 }
 
 async function readUpstreamError(upstreamResponse) {
@@ -1397,6 +1420,23 @@ export async function handleResponsesRequest(request, response, pathname, contex
           errorCode: 'CLIENT_CLOSED_REQUEST',
           usage: null,
           responseBytes: writer.bytes
+        };
+      }
+      if (isOutputLimitToolArgumentTruncation(error)) {
+        const incomplete = await endIncompleteStream(builder, writer, 'max_output_tokens');
+        return {
+          ...outcomeBase(started, pathname, body, activeModelInfo.model, translated),
+          allowed: true,
+          rejected: false,
+          status: 200,
+          responseStatus: 200,
+          upstreamError: false,
+          incomplete: true,
+          incompleteReason: 'max_output_tokens',
+          incompleteDiagnostics: error.diagnostics,
+          usage: null,
+          responseBytes: writer.bytes,
+          outputItems: incomplete.output.length
         };
       }
       const apiError = error instanceof ResponsesApiError

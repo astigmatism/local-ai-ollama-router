@@ -1121,6 +1121,16 @@ async function handleResponses(request, response, url, context) {
       clientIdentity: record.clientIdentity,
       sourceIp: record.sourceIp
     });
+  } else if (outcome.incomplete) {
+    await persistEvent(context.store, {
+      type: 'responses_incomplete',
+      reason: outcome.incompleteReason,
+      ...(outcome.incompleteDiagnostics ? { diagnostics: outcome.incompleteDiagnostics } : {}),
+      endpoint: url.pathname,
+      model: outcome.forwardedModel,
+      clientIdentity: record.clientIdentity,
+      sourceIp: record.sourceIp
+    });
   } else if (outcome.upstreamError) {
     await persistEvent(context.store, {
       type: 'responses_upstream_failed',
