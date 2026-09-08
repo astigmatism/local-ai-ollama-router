@@ -130,6 +130,16 @@ Events capture operational changes:
 - maintenance mode changes
 - upstream failures
 
+For a `llama_cpp` active profile, prewarm is a residency operation rather than
+a capability qualification. The router first requires backend health, then
+sends exactly one non-streaming raw `/v1/completions` request through the active
+marker's internal backend URL. The request uses a fixed short prompt, one output
+token, temperature zero, one sample, and a fixed seed. Raw completion avoids the
+chat template and carries neither reasoning controls nor tool definitions. The
+entire response must arrive within 55 seconds and 16 KiB; only status, latency,
+and token count are retained. Prompt text and generated content are never
+returned or written to the event log.
+
 ## Deployment states
 
 ### Phase 1: API/admin split

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { normalizeThinkForModel, upstreamFetch } from '../src/upstream.js';
+import { normalizeThinkForModel, upstreamFetch, upstreamJson } from '../src/upstream.js';
 
 async function listen(server) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -110,6 +110,50 @@ test('native upstream transport aborts a delayed-header request at the configure
     (error) => {
       assert.equal(error.name, 'AbortError');
       assert.equal(error.code, 'ABORT_ERR');
+      return true;
+    }
+  );
+});
+
+test('bounded upstream JSON rejects a response body that exceeds its byte ceiling', async (t) => {
+  const fixture = createFixture((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ value: 'x'.repeat(1024) }));
+  });
+  t.after(() => close(fixture.server, fixture.timers));
+  const port = await listen(fixture.server);
+
+  await assert.rejects(
+    upstreamJson({
+      upstreamUrl: `http://127.0.0.1:${port}`,
+      upstreamTimeoutMs: 250
+    }, '/bounded', { maxResponseBytes: 128 }),
+    (error) => {
+      assert.equal(error.code, 'UPSTREAM_RESPONSE_TOO_LARGE');
+      assert.equal(error.message.includes('x'.repeat(32)), false);
+      return true;
+    }
+  );
+});
+
+test('bounded upstream JSON timeout remains active after response headers', async (t) => {
+  const fixture = createFixture((_request, response, schedule) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"ok":');
+    schedule(() => {
+      if (!response.destroyed) response.end('true}');
+    }, 500);
+  });
+  t.after(() => close(fixture.server, fixture.timers));
+  const port = await listen(fixture.server);
+
+  await assert.rejects(
+    upstreamJson({
+      upstreamUrl: `http://127.0.0.1:${port}`,
+      upstreamTimeoutMs: 30
+    }, '/bounded', { maxResponseBytes: 128 }),
+    (error) => {
+      assert.equal(error.code, 'UPSTREAM_TIMEOUT');
       return true;
     }
   );

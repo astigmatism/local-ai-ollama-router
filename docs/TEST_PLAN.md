@@ -207,6 +207,13 @@ curl -fsS -X POST -H 'content-type: application/json' \
   -d '{"enabled":true}' http://192.168.1.21:11435/admin/api/maintenance
 ```
 
+For a `llama_cpp` profile, a successful prewarm response confirms one generated
+token. It does not expose the raw completion. A readiness failure returns
+`BACKEND_NOT_READY`; response overflow, timeout, rejection, and malformed-success
+cases fail closed with specific prewarm error codes. The switch workflow must
+keep the router drained until this call and its final backend consistency check
+both succeed.
+
 While maintenance mode is enabled, `/api/chat` and `/api/generate` on `11434` should return `MAINTENANCE_MODE`, while `/api/version` should still pass through.
 
 Legacy same-port admin APIs still honor `ADMIN_TOKEN` when it is set:

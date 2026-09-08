@@ -67,7 +67,16 @@ function createFakeLlama() {
   const hold = new Promise((resolve) => { releaseHolds = resolve; });
   let releaseValidation;
   const validationHold = new Promise((resolve) => { releaseValidation = resolve; });
-  const state = { releaseHolds, releaseValidation, cancelled: false, healthy: true };
+  let releasePrewarm;
+  const prewarmHold = new Promise((resolve) => { releasePrewarm = resolve; });
+  const state = {
+    releaseHolds,
+    releaseValidation,
+    releasePrewarm,
+    cancelled: false,
+    healthy: true,
+    prewarmMode: 'success'
+  };
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://fake-llama.local');
     const body = ['GET', 'HEAD'].includes(request.method) ? null : await readJsonBody(request);
@@ -97,6 +106,32 @@ function createFakeLlama() {
           ? 97280
           : (content.includes('OVERSIZE') ? 130000 : 8));
       return sendJson(response, 200, { tokens: Array.from({ length: count }, (_, index) => index) });
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/completions') {
+      if (state.prewarmMode === 'delayed-body') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.write('{"id":"completion-prewarm-delayed"');
+        await prewarmHold;
+        if (!response.destroyed) response.end('}');
+        return;
+      }
+      if (state.prewarmMode === 'oversized') {
+        return sendJson(response, 200, {
+          choices: [{ index: 0, text: 'x', finish_reason: 'length' }],
+          usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 },
+          padding: 'private-generated-output'.repeat(1024)
+        });
+      }
+      if (state.prewarmMode === 'rejected') {
+        return sendJson(response, 500, { error: { message: 'private-generated-output' } });
+      }
+      return sendJson(response, 200, {
+        id: 'completion-prewarm-1',
+        object: 'text_completion',
+        model: body.model,
+        choices: [{ index: 0, text: 'ready', finish_reason: 'length' }],
+        usage: { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5 }
+      });
     }
     if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
       const prompt = (body?.messages || []).map((message) => String(message.content || '')).join('\n');
@@ -244,7 +279,8 @@ async function makeFixture({
   vision = false,
   unsupportedToolsPolicy = 'passthrough',
   maxOutputTokens = 4096,
-  contextSafetyReserve = 1024
+  contextSafetyReserve = 1024,
+  upstreamTimeoutMs = 5000
 } = {}) {
   const backend = createFakeLlama();
   const backendPort = await listen(backend.server);
@@ -281,7 +317,7 @@ async function makeFixture({
       ADMIN_ENABLED: 'true',
       ADMIN_BIND_HOST: '127.0.0.1',
       OLLAMA_UPSTREAM_URL: 'http://127.0.0.1:1',
-      LLAMA_CPP_UPSTREAM_URL: `http://127.0.0.1:${backendPort}`,
+      LLAMA_CPP_UPSTREAM_URL: 'http://127.0.0.1:1',
       OLLAMA_UPSTREAM_TIMEOUT_MS: '5000',
       ACTIVE_MODEL_FILE: markerPath,
       ROUTER_CONTROL_FILE: path.join(dir, 'router-control.json'),
@@ -291,7 +327,8 @@ async function makeFixture({
       ADMIN_TOKEN: 'secret-token',
       DATA_DIR: dir,
       ENABLE_NVIDIA_SMI: 'false'
-    })
+    }),
+    upstreamTimeoutMs
   };
   const router = await createRouterServer(config);
   const apiPort = await listen(router.server);
@@ -299,6 +336,7 @@ async function makeFixture({
   const cleanup = async () => {
     backend.state.releaseHolds();
     backend.state.releaseValidation();
+    backend.state.releasePrewarm();
     await close(router.adminServer);
     await close(router.server);
     await close(backend.server);
@@ -995,6 +1033,149 @@ test('authenticated draining, two-active limit, backend error, and cancellation 
     await cancelResponse.body.getReader().read();
     controller.abort();
     await waitForActive(fixture, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('authenticated llama.cpp prewarm checks readiness then performs one bounded deterministic raw completion without returning content', async () => {
+  const fixture = await makeFixture();
+  try {
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result, {
+      ok: true,
+      model: PINNED,
+      backend: 'llama_cpp',
+      status: 200,
+      latencyMs: result.latencyMs,
+      generatedTokens: 1
+    });
+    assert.equal(Number.isSafeInteger(result.latencyMs), true);
+    const prewarmRequests = fixture.backend.requests.filter((request) => request.pathname === '/v1/completions');
+    assert.equal(prewarmRequests.length, 1);
+    const readinessIndex = fixture.backend.requests.findIndex((request) => request.pathname === '/health');
+    const prewarmIndex = fixture.backend.requests.findIndex((request) => request.pathname === '/v1/completions');
+    assert.ok(readinessIndex >= 0);
+    assert.ok(prewarmIndex > readinessIndex);
+    assert.deepEqual(prewarmRequests[0].body, {
+      model: PINNED,
+      prompt: 'Operational pre-warm.',
+      stream: false,
+      max_tokens: 1,
+      temperature: 0,
+      top_p: 1,
+      n: 1,
+      seed: 0
+    });
+    assert.equal(Object.hasOwn(prewarmRequests[0].body, 'tools'), false);
+    assert.equal(Object.hasOwn(prewarmRequests[0].body, 'reasoning_effort'), false);
+    assert.equal(Object.hasOwn(prewarmRequests[0].body, 'chat_template_kwargs'), false);
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_triggered');
+    assert.equal(event.ok, true);
+    assert.equal(event.stage, 'inference');
+    assert.equal(event.generatedTokens, 1);
+    assert.equal(JSON.stringify(event).includes('ready'), false);
+    assert.equal(Object.hasOwn(result, 'upstream'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp prewarm fails closed before inference when readiness fails', async () => {
+  const fixture = await makeFixture();
+  try {
+    fixture.backend.state.healthy = false;
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'BACKEND_NOT_READY');
+    assert.equal(fixture.backend.requests.some((request) => request.pathname === '/v1/completions'), false);
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_failed');
+    assert.equal(event.stage, 'readiness');
+    assert.equal(event.code, 'BACKEND_NOT_READY');
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp prewarm rejects an oversized active model identifier before readiness or inference', async () => {
+  const fixture = await makeFixture({ model: 'm'.repeat(513) });
+  try {
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'INVALID_ACTIVE_MODEL');
+    assert.equal(fixture.backend.requests.length, 0);
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_failed');
+    assert.equal(event.stage, 'input');
+    assert.equal(event.model, null);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp prewarm bounds the response and never records raw generated output', async () => {
+  const fixture = await makeFixture();
+  try {
+    fixture.backend.state.prewarmMode = 'oversized';
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.equal(result.error.code, 'PREWARM_RESPONSE_TOO_LARGE');
+    assert.equal(JSON.stringify(result).includes('private-generated-output'), false);
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_failed');
+    assert.equal(event.code, 'PREWARM_RESPONSE_TOO_LARGE');
+    assert.equal(JSON.stringify(event).includes('private-generated-output'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp prewarm timeout covers a stalled response body and records only a stable error code', async () => {
+  const fixture = await makeFixture({ upstreamTimeoutMs: 30 });
+  try {
+    fixture.backend.state.prewarmMode = 'delayed-body';
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 504);
+    assert.equal((await response.json()).error.code, 'PREWARM_TIMEOUT');
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_failed');
+    assert.equal(event.code, 'PREWARM_TIMEOUT');
+    assert.equal(Object.hasOwn(event, 'error'), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('llama.cpp prewarm rejects an upstream failure without exposing its response', async () => {
+  const fixture = await makeFixture();
+  try {
+    fixture.backend.state.prewarmMode = 'rejected';
+    const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/prewarm`, {
+      method: 'POST',
+      headers: { 'x-admin-token': 'secret-token' }
+    });
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.equal(result.error.code, 'PREWARM_UPSTREAM_REJECTED');
+    assert.equal(JSON.stringify(result).includes('private-generated-output'), false);
+    const event = await waitForEvent(fixture, (entry) => entry.type === 'prewarm_failed');
+    assert.equal(event.code, 'PREWARM_UPSTREAM_REJECTED');
+    assert.equal(JSON.stringify(event).includes('private-generated-output'), false);
   } finally {
     await fixture.cleanup();
   }

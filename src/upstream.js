@@ -60,8 +60,46 @@ export async function upstreamFetch(config, pathname, options = {}) {
   }
 }
 
-export async function upstreamJson(config, pathname, { method = 'GET', body = undefined, timeoutMs = undefined, headers = {} } = {}) {
-  const response = await upstreamFetch(config, pathname, {
+function upstreamError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+async function readBoundedResponseText(response, maxResponseBytes) {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (totalBytes > maxResponseBytes) {
+        await reader.cancel();
+        throw upstreamError(
+          'UPSTREAM_RESPONSE_TOO_LARGE',
+          `Upstream JSON response exceeded the ${maxResponseBytes}-byte limit.`
+        );
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalBytes).toString('utf8');
+}
+
+export async function upstreamJson(config, pathname, {
+  method = 'GET',
+  body = undefined,
+  timeoutMs = undefined,
+  headers = {},
+  maxResponseBytes = undefined
+} = {}) {
+  const request = {
     method,
     timeoutMs,
     headers: {
@@ -70,8 +108,35 @@ export async function upstreamJson(config, pathname, { method = 'GET', body = un
       ...headers
     },
     body: body === undefined ? undefined : JSON.stringify(body)
-  });
-  const text = await response.text();
+  };
+  let response;
+  let text;
+  if (maxResponseBytes === undefined) {
+    response = await upstreamFetch(config, pathname, request);
+    text = await response.text();
+  } else {
+    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+      throw new TypeError('maxResponseBytes must be a positive safe integer.');
+    }
+    const effectiveTimeoutMs = timeoutMs ?? config.upstreamTimeoutMs;
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, effectiveTimeoutMs);
+    try {
+      response = await upstreamFetch(config, pathname, { ...request, signal: controller.signal });
+      text = await readBoundedResponseText(response, maxResponseBytes);
+    } catch (error) {
+      if (timedOut) {
+        throw upstreamError('UPSTREAM_TIMEOUT', `Upstream JSON request exceeded the ${effectiveTimeoutMs} ms timeout.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   let json = null;
   if (text.trim()) {
     try {
