@@ -172,7 +172,13 @@ ADMIN_URL=http://192.168.1.21:11435 \
 ./scripts/responses-smoke-test.sh
 ```
 
-The script reads the active marker, snapshots `/api/ps`, streams a text response, asks the model to call the harmless `get_test_value` function, returns `router-smoke-42` as a `function_call_output`, and verifies that the final answer incorporates it. It then confirms both the active marker and loaded-model set are unchanged. It never requests a model pull or switch.
+The script reads the active marker, snapshots `/api/ps`, and explicitly disables
+reasoning so the small deterministic output ceilings cannot be consumed by a
+profile default. It streams a text response, asks the model to call the harmless
+`get_test_value` function, returns `router-smoke-42` as a
+`function_call_output`, and verifies that the final answer incorporates it. It
+then confirms both the active marker and loaded-model set are unchanged. It
+never requests a model pull or switch.
 
 Expected final lines include:
 

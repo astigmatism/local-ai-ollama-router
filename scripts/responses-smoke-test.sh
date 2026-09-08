@@ -22,7 +22,7 @@ echo "1. Streamed Responses text"
 curl -fsS -N "$ROUTER_URL/v1/responses" \
   -H 'content-type: application/json' \
   -H "x-client-name: $SMOKE_CLIENT" \
-  -d "$(jq -cn --arg model "$REQUESTED_MODEL" '{model:$model,input:"Reply with a five-word router health check.",stream:true,store:false,max_output_tokens:64}')" \
+  -d "$(jq -cn --arg model "$REQUESTED_MODEL" '{model:$model,input:"Reply with a five-word router health check.",reasoning:{effort:"none"},stream:true,store:false,max_output_tokens:64}')" \
   > "$SMOKE_DIR/text.sse"
 grep -q '"type":"response.output_text.delta"' "$SMOKE_DIR/text.sse"
 grep -q '"type":"response.completed"' "$SMOKE_DIR/text.sse"
@@ -35,6 +35,7 @@ TOOL_RESPONSE="$(curl -fsS "$ROUTER_URL/v1/responses" \
   -d "$(jq -cn --arg model "$REQUESTED_MODEL" '{
     model:$model,
     input:"Call get_test_value now with key router_smoke. Do not answer from memory; use the function.",
+    reasoning:{effort:"none"},
     store:false,
     tools:[{
       type:"function",
@@ -55,6 +56,7 @@ FOLLOW_UP_BODY="$(jq -cn \
   --argjson call "$CALL_ITEM" \
   '{
     model:$model,
+    reasoning:{effort:"none"},
     input:[
       {role:"user",content:"Call get_test_value now with key router_smoke. Do not answer from memory; use the function."},
       $call,
@@ -81,7 +83,7 @@ echo "4. Omitted model"
 OMITTED_MODEL_RESPONSE="$(curl -fsS "$ROUTER_URL/v1/responses" \
   -H 'content-type: application/json' \
   -H "x-client-name: $SMOKE_CLIENT" \
-  -d '{"input":"Reply with exactly: omitted model ok","store":false,"stream":false,"max_output_tokens":32}')"
+  -d '{"input":"Reply with exactly: omitted model ok","reasoning":{"effort":"none"},"store":false,"stream":false,"max_output_tokens":32}')"
 jq -e --arg active "$ACTIVE_MODEL" '.model == $active and .status == "completed"' \
   <<< "$OMITTED_MODEL_RESPONSE" > /dev/null
 
