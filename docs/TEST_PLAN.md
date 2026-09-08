@@ -31,6 +31,7 @@ The test suite validates:
 - stable-alias discovery list/detail behavior, unknown-ID and no-active errors
 - marker-aware metadata cache invalidation, source precedence, partial enrichment, and ETag revalidation
 - conservative modality and validated Responses reasoning metadata
+- OpenAI-compatible context-overflow classification, exact-boundary admission, stream/non-stream agreement, no generation forwarding, and discovery reserve metadata
 - exact-alias forwarding with broad requested-model rewriting disabled
 - proof that `/v1/models` never enumerates the installed `/api/tags` catalog
 - non-streaming and SSE text/function-call output

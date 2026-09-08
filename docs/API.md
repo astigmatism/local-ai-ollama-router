@@ -88,11 +88,26 @@ All Ollama upstream calls use Node's native HTTP transport. The configured `OLLA
 
 `POST /v1/chat/completions` is policy-enforced and proxied to Ollama's matching OpenAI-compatible endpoint. Model rewriting uses the same active-model rules as `/api/chat`. Messages, streaming, sampling parameters, and other OpenAI fields remain unchanged; the router does not inject Ollama `keep_alive` into this protocol. Native tool fields are normalized according to `UNSUPPORTED_TOOLS_POLICY` before forwarding.
 
+For a `llama_cpp` active profile, `/v1/chat/completions`, `/v1/responses`, and `/responses` share the same formatted-context admission guard. The router applies the active template, tokenizes the complete formatted prompt, and permits a request only when `formatted input + requested output + context safety reserve <= per-request context window`. An overflow is rejected before generation with HTTP 400 and this OpenAI error shape on all three endpoints, regardless of the requested streaming mode:
+
+```json
+{
+  "error": {
+    "message": "Formatted input (101165) plus requested output (32768) and safety reserve (1024) exceeds the 131072-token slot.",
+    "type": "invalid_request_error",
+    "param": "messages",
+    "code": "context_length_exceeded"
+  }
+}
+```
+
+`context_length_exceeded` is the stable OpenAI-compatible classification code; clients should route on it rather than parse the arithmetic message. Native `/api/chat` and `/api/generate` use the same guard but retain the router's native `{error:{code,message}}` envelope. The router never truncates, summarizes, or forwards an over-capacity request.
+
 ## OpenAI Responses compatibility
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
 
-The router also implements `GET /v1/models` and `GET /v1/models/{alias}`. They publish exactly one stable active-slot alias with dynamically discovered metadata; they do not enumerate or permit selection of installed physical models. The full schema and field semantics are documented in [Stable Active-Model Discovery](MODEL_DISCOVERY.md).
+The router also implements `GET /v1/models` and `GET /v1/models/{alias}`. They publish exactly one stable active-slot alias with dynamically discovered metadata, including the additive schema-v2 `context_safety_reserve` used by llama.cpp admission; they do not enumerate or permit selection of installed physical models. The full schema and field semantics are documented in [Stable Active-Model Discovery](MODEL_DISCOVERY.md).
 
 ### Active-model routing rules
 

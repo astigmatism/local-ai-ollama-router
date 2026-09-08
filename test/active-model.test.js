@@ -77,6 +77,26 @@ test('normalizes optional discovery metadata without requiring it on older marke
   assert.equal(typeof info.file_mtime_ms, 'number');
 });
 
+test('validates the context safety reserve as a nonnegative marker integer', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-context-reserve-'));
+  const file = path.join(dir, 'active-model.json');
+  await writeActiveModelMarker(file, {
+    model: 'model-a:test',
+    context_safety_reserve: 0
+  });
+  const zero = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.equal(zero.context_safety_reserve, 0);
+  assert.equal(zero.metadata_warnings.includes('INVALID_MARKER_CONTEXT_SAFETY_RESERVE'), false);
+
+  await writeActiveModelMarker(file, {
+    model: 'model-a:test',
+    context_safety_reserve: -1
+  });
+  const invalid = await readActiveModel(loadConfig({ ACTIVE_MODEL_FILE: file, ADMIN_TOKEN: '' }));
+  assert.equal(invalid.context_safety_reserve, null);
+  assert.equal(invalid.metadata_warnings.includes('INVALID_MARKER_CONTEXT_SAFETY_RESERVE'), true);
+});
+
 test('reads and writes additive volatile prompt-cache metadata while old markers default to null', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'router-marker-cache-'));
   const file = path.join(dir, 'active-model.json');

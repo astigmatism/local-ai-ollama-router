@@ -187,6 +187,7 @@ test('model discovery lists one stable alias, supports detail lookup and ETags, 
     assert.equal(list.data[0].x_ollama_router.upstream_model, 'model-a:test');
     assert.equal(list.data[0].x_ollama_router.context_window, 8192);
     assert.equal(list.data[0].x_ollama_router.model_context_window, 131072);
+    assert.equal(list.data[0].x_ollama_router.context_safety_reserve, null);
     assert.equal(list.data[0].x_ollama_router.max_output_tokens, 2048);
     assert.deepEqual(list.data[0].x_ollama_router.input_modalities, ['text']);
     assert.deepEqual(list.data[0].x_ollama_router.capabilities, ['completion', 'tools', 'thinking']);

@@ -7,6 +7,11 @@ function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
+function nonNegativeInteger(value) {
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) value = Number(value.trim());
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 function firstPositiveInteger(candidates) {
   for (const value of candidates) {
     const normalized = positiveInteger(value);
@@ -33,6 +38,7 @@ function markerMetadata(parsed) {
   ];
   const contextLength = firstPositiveInteger(contextCandidates);
   const maxOutputTokens = firstPositiveInteger(maxOutputCandidates);
+  const contextSafetyReserve = nonNegativeInteger(parsed.context_safety_reserve);
   const inputModalities = Array.isArray(rawModalities)
     ? [...new Set(rawModalities
       .filter((value) => typeof value === 'string' && value.trim())
@@ -50,6 +56,11 @@ function markerMetadata(parsed) {
   }
   if (maxOutputCandidates.some((value) => value !== undefined && value !== null) && maxOutputTokens === null) {
     warnings.push('INVALID_MARKER_MAX_OUTPUT_TOKENS');
+  }
+  if (parsed.context_safety_reserve !== undefined
+    && parsed.context_safety_reserve !== null
+    && contextSafetyReserve === null) {
+    warnings.push('INVALID_MARKER_CONTEXT_SAFETY_RESERVE');
   }
 
   return {
@@ -70,7 +81,7 @@ function markerMetadata(parsed) {
     total_context_length: positiveInteger(parsed.total_context_length),
     max_active_requests: positiveInteger(parsed.max_active_requests),
     default_output_tokens: positiveInteger(parsed.default_output_tokens),
-    context_safety_reserve: positiveInteger(parsed.context_safety_reserve),
+    context_safety_reserve: contextSafetyReserve,
     gpu_uuids: Array.isArray(parsed.gpu_uuids)
       ? parsed.gpu_uuids.filter((value) => typeof value === 'string' && value.startsWith('GPU-'))
       : null,

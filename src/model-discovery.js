@@ -6,7 +6,11 @@ import {
   validateReasoningCapabilities
 } from './reasoning.js';
 import { upstreamJson } from './upstream.js';
-import { resolveBackendAdapter, validatedReasoningPolicy } from './backend-adapters.js';
+import {
+  enforcedContextSafetyReserve,
+  resolveBackendAdapter,
+  validatedReasoningPolicy
+} from './backend-adapters.js';
 
 const CANONICAL_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -316,6 +320,7 @@ export class ActiveModelDiscovery {
         updated_at: updatedAt,
         context_window: loadedContext ?? activeModel.context_length ?? architecturalContext,
         total_context_window: activeModel.total_context_length ?? loadedContext ?? activeModel.context_length ?? architecturalContext,
+        context_safety_reserve: enforcedContextSafetyReserve(activeModel),
         active_request_limit: activeModel.max_active_requests ?? null,
         model_context_window: architecturalContext,
         max_output_tokens: activeModel.max_output_tokens ?? null,

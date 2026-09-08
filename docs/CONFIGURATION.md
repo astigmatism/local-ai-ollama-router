@@ -83,7 +83,7 @@ Marker format:
 }
 ```
 
-The canonical optional discovery fields are `context_length`, `max_output_tokens`, `input_modalities`, and `revision`. Existing context hints (`context`, `num_ctx`, `numCtx`, or `options.num_ctx`) remain accepted, as do the documented compatibility aliases in [Stable Active-Model Discovery](MODEL_DISCOVERY.md). Older markers do not need any new field.
+The canonical optional discovery fields are `context_length`, `context_safety_reserve`, `max_output_tokens`, `input_modalities`, and `revision`. `context_safety_reserve` is a nonnegative integer added by the llama.cpp router preflight to formatted input and requested output; it defaults to `1024` when absent or invalid and is not model context or output capacity. Existing context hints (`context`, `num_ctx`, `numCtx`, or `options.num_ctx`) remain accepted, as do the documented compatibility aliases in [Stable Active-Model Discovery](MODEL_DISCOVERY.md). Older markers do not need any new field.
 
 For a `llama_cpp` deployment, `capability_profile.tools` and `capability_profile.vision` are profile-owned authorization facts rather than model-name heuristics. Set `vision: true` and include `image` in `input_modalities` only after the running backend has loaded the exact matching multimodal projector and `GET /props` reports `modalities.vision: true`. The usual llama.cpp startup control is `--mmproj /path/to/mmproj-*.gguf`. The projector revision must match the deployed model artifacts. A marker update must not advertise vision merely because the base checkpoint family is multimodal.
 

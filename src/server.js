@@ -517,7 +517,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
   sendJson(response, 404, errorPayload('ADMIN_ROUTE_NOT_FOUND', 'Admin API route not found.'));
 }
 
-async function rejectProxyRequest(response, context, record, status, code, message, extra = {}) {
+async function rejectProxyRequest(response, context, record, status, code, message, extra = {}, openAiError = null) {
   const finalRecord = {
     ...record,
     ...extra,
@@ -550,7 +550,16 @@ async function rejectProxyRequest(response, context, record, status, code, messa
     clientIdentity: record.clientIdentity,
     sourceIp: record.sourceIp
   });
-  sendJson(response, status, errorPayload(code, message));
+  sendJson(response, status, openAiError
+    ? {
+        error: {
+          message,
+          type: openAiError.type,
+          param: openAiError.param ?? null,
+          code
+        }
+      }
+    : errorPayload(code, message));
 }
 
 async function handleProxy(request, response, url, context) {
@@ -922,7 +931,21 @@ async function handleProxy(request, response, url, context) {
       }
     } catch (error) {
       if (error instanceof BackendAdapterError) {
-        await rejectProxyRequest(response, context, commonRecord, error.statusCode, error.code, error.message, commonRecord);
+        await rejectProxyRequest(
+          response,
+          context,
+          commonRecord,
+          error.statusCode,
+          error.code,
+          error.message,
+          commonRecord,
+          pathname === '/v1/chat/completions'
+            ? {
+                type: error.statusCode >= 500 ? 'server_error' : 'invalid_request_error',
+                param: error.param
+              }
+            : null
+        );
         requestPersisted = true;
         return;
       }

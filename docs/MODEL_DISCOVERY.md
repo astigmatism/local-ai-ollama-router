@@ -42,12 +42,14 @@ Values below are illustrative. The physical model, limits, modalities, capabilit
   "created": 1788200000,
   "owned_by": "local-ai-ollama-router",
   "x_ollama_router": {
-    "schema_version": 1,
+    "schema_version": 2,
     "alias": true,
     "upstream_model": "model-a:test",
     "profile": "example-profile",
     "updated_at": "2026-08-31T19:00:00.000Z",
     "context_window": 16384,
+    "total_context_window": 32768,
+    "context_safety_reserve": 1024,
     "model_context_window": 131072,
     "max_output_tokens": 2048,
     "input_modalities": ["text"],
@@ -92,6 +94,8 @@ Field semantics:
 - `upstream_model` is the current physical Ollama model from the active-model source.
 - `profile` and `updated_at` come from the marker and are `null` when absent or invalid.
 - `context_window` is the effective limit clients should currently use. Precedence is the matching loaded model's positive `/api/ps` `context_length`, the marker's positive configured context, the reliable architectural context from `/api/show`, then `null`.
+- `total_context_window` is the deployment-wide context allocation when the marker publishes one. It can span multiple request slots and is not the per-request admission limit.
+- `context_safety_reserve` is the nonnegative token reserve that the router adds to every llama.cpp generation request during preflight admission. It defaults to `1024` for a llama.cpp marker and is `null` when the selected backend has no router-enforced formatted-context preflight. Clients can budget proactively with `formatted_input + requested_output + context_safety_reserve <= context_window`; the reserve is neither model context nor output capacity and must not be subtracted from `max_output_tokens` in isolation.
 - `model_context_window` is only the architectural maximum reliably identified in `/api/show` `model_info`, normally using `general.architecture` and `<architecture>.context_length`. It is otherwise `null`.
 - `max_output_tokens` is a positive value explicitly supplied by the marker. The router does not infer one from context size, architecture, or a model name; it is `null` when not configured.
 - `input_modalities` combines explicit marker declarations with reported backend capabilities. `completion` adds `text`; `vision` adds `image`. For `llama_cpp`, the adapter reports `vision` only when the active marker sets `capability_profile.vision: true`; deployment marker generation must first verify the running server's `/props.modalities.vision`. The router never infers image support from a model or profile name.
@@ -109,6 +113,7 @@ Existing markers remain valid. Discovery recognizes these optional canonical fie
   "model": "model-a:test",
   "profile": "example-profile",
   "context_length": 16384,
+  "context_safety_reserve": 1024,
   "max_output_tokens": 2048,
   "input_modalities": ["text"],
   "default_think": "medium",
@@ -126,7 +131,7 @@ Existing markers remain valid. Discovery recognizes these optional canonical fie
 }
 ```
 
-For compatibility, marker context aliases already used by the dashboard (`context`, `num_ctx`, `numCtx`, and `options.num_ctx`) are also accepted. Output-limit aliases `maxOutputTokens`, `num_predict`, and `options.num_predict` are accepted, but the canonical names are preferred. `modalities` is accepted as an alias for `input_modalities`.
+For compatibility, marker context aliases already used by the dashboard (`context`, `num_ctx`, `numCtx`, and `options.num_ctx`) are also accepted. Output-limit aliases `maxOutputTokens`, `num_predict`, and `options.num_predict` are accepted, but the canonical names are preferred. `modalities` is accepted as an alias for `input_modalities`. `context_safety_reserve`, when present, must be a nonnegative integer; invalid values are ignored, reported as `INVALID_MARKER_CONTEXT_SAFETY_RESERVE`, and cause the llama.cpp admission guard and discovery entry to use the enforced default of `1024`.
 
 Reasoning capability validation is shared with generation. `supported_think_levels` and `reasoning_effort_map` must appear together and satisfy the existing full-map validation. When valid, `reasoning.efforts` advertises the canonical Responses wire values, while `upstream_levels` and `effort_map` separately expose the actual Ollama negotiation. `off: "none"` documents the router's Responses control for disabling thinking. If safe reasoning support cannot be established, `supported` is `null` or `false`, unavailable upstream fields are `null`, and the router does not invent a mapping.
 
@@ -179,7 +184,7 @@ This router publishes metadata; it does not automatically reconfigure DeepSeek H
 
 - Configure only the stable router alias.
 - Fetch `/v1/models/{alias}` at startup and when beginning a new request or session, using ETag revalidation.
-- Apply `context_window`, `max_output_tokens`, `input_modalities`, and reasoning metadata when present.
+- Apply `context_window`, `context_safety_reserve`, `max_output_tokens`, `input_modalities`, and reasoning metadata when present.
 - Never persist `upstream_model` as the configured model ID.
 - Retain the last safe values or fall back conservatively when metadata is incomplete.
 - Refresh safely when a marker change causes the router to publish a new ETag and active physical model.

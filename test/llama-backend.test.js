@@ -71,7 +71,12 @@ function createFakeLlama() {
     }
     if (request.method === 'POST' && url.pathname === '/tokenize') {
       if (String(body?.content || '').includes('VALIDATION_DELAY')) await validationHold;
-      const count = String(body?.content || '').includes('OVERSIZE') ? 130000 : 8;
+      const content = String(body?.content || '');
+      const count = content.includes('OBSERVED_OVERFLOW')
+        ? 101165
+        : (content.includes('EXACT_BOUNDARY')
+          ? 97280
+          : (content.includes('OVERSIZE') ? 130000 : 8));
       return sendJson(response, 200, { tokens: Array.from({ length: count }, (_, index) => index) });
     }
     if (request.method === 'POST' && url.pathname === '/v1/chat/completions') {
@@ -218,7 +223,9 @@ async function makeFixture({
   model = PINNED,
   tools = false,
   vision = false,
-  unsupportedToolsPolicy = 'passthrough'
+  unsupportedToolsPolicy = 'passthrough',
+  maxOutputTokens = 4096,
+  contextSafetyReserve = 1024
 } = {}) {
   const backend = createFakeLlama();
   const backendPort = await listen(backend.server);
@@ -232,9 +239,9 @@ async function makeFixture({
     keep_alive: -1,
     context_length: 131072,
     total_context_length: 262144,
-    max_output_tokens: 4096,
+    max_output_tokens: maxOutputTokens,
     default_output_tokens: 512,
-    context_safety_reserve: 1024,
+    context_safety_reserve: contextSafetyReserve,
     max_active_requests: 2,
     input_modalities: vision ? ['text', 'image'] : ['text'],
     prompt_cache_mode: 'volatile_slot_lcp',
@@ -296,6 +303,10 @@ function parseSse(text) {
     .filter((data) => data && data !== '[DONE]')
     .map(JSON.parse);
 }
+
+// DeepSeek Harness classifies provider codes matching this structured
+// context-length/window convention before normalizing to CONTEXT_WINDOW_EXCEEDED.
+const HARNESS_STRUCTURED_CONTEXT_OVERFLOW = /(?:^|[^a-z0-9])context[\s_-](?:length|window)[\s_-](?:exceed(?:ed|s)?|overflow(?:ed)?|limit[\s_-]exceeded)(?:$|[^a-z0-9])/i;
 
 async function runtimeState(fixture) {
   const response = await fetch(`http://127.0.0.1:${fixture.adminPort}/admin/api/runtime-state`, {
@@ -507,7 +518,7 @@ test('llama.cpp capability and context policies reject before generation', async
       { body: { model: 'local-active', messages: [{ role: 'user', content: 'x' }], stream: false, slot_action: 'save', slot_save_path: '/tmp/forbidden' }, code: 'UNSUPPORTED_PROFILE_CAPABILITY' },
       { body: { model: 'local-active', messages: [{ role: 'user', content: 'x' }], stream: false, cache_idle_slots: true, cache_ram: 8192 }, code: 'UNSUPPORTED_PROFILE_CAPABILITY' },
       { body: { model: 'local-active', messages: [{ role: 'user', content: 'x' }], stream: false, options: { cache_prompt: true } }, code: 'BACKEND_CONTROL_FORBIDDEN' },
-      { body: { model: 'local-active', messages: [{ role: 'user', content: 'OVERSIZE' }], stream: false, max_tokens: 128 }, code: 'CONTEXT_LIMIT_EXCEEDED' }
+      { body: { model: 'local-active', messages: [{ role: 'user', content: 'OVERSIZE' }], stream: false, max_tokens: 128 }, code: 'context_length_exceeded' }
     ];
     for (const item of cases) {
       const response = await post(fixture.apiPort, '/v1/chat/completions', item.body);
@@ -515,6 +526,89 @@ test('llama.cpp capability and context policies reject before generation', async
       assert.equal((await response.json()).error.code, item.code);
     }
     assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('context overflow is OpenAI-structured, Harness-recognizable, and never forwarded to generation', async () => {
+  const fixture = await makeFixture({ maxOutputTokens: 32768 });
+  const message = 'Formatted input (101165) plus requested output (32768) and safety reserve (1024) exceeds the 131072-token slot.';
+  try {
+    const cases = [
+      {
+        pathname: '/v1/responses',
+        body: { model: 'local-active', input: 'OBSERVED_OVERFLOW', stream: false, store: false, max_output_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/responses',
+        body: { model: 'local-active', input: 'OBSERVED_OVERFLOW', stream: true, store: false, max_output_tokens: 32768 }
+      },
+      {
+        pathname: '/responses',
+        body: { model: 'local-active', input: 'OBSERVED_OVERFLOW', stream: false, store: false, max_output_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/chat/completions',
+        body: { model: 'local-active', messages: [{ role: 'user', content: 'OBSERVED_OVERFLOW' }], stream: false, max_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/chat/completions',
+        body: { model: 'local-active', messages: [{ role: 'user', content: 'OBSERVED_OVERFLOW' }], stream: true, max_tokens: 32768 }
+      }
+    ];
+
+    for (const item of cases) {
+      const generatedBefore = fixture.backend.requests
+        .filter((request) => request.pathname === '/v1/chat/completions').length;
+      const response = await post(fixture.apiPort, item.pathname, item.body);
+      assert.equal(response.status, 400);
+      assert.match(response.headers.get('content-type'), /^application\/json/);
+      const payload = await response.json();
+      assert.deepEqual(payload.error, {
+        message,
+        type: 'invalid_request_error',
+        param: 'messages',
+        code: 'context_length_exceeded'
+      });
+      assert.equal(HARNESS_STRUCTURED_CONTEXT_OVERFLOW.test(payload.error.code), true);
+      assert.equal(payload.error.message.includes('101165'), true);
+      assert.equal(payload.error.message.includes('32768'), true);
+      assert.equal(payload.error.message.includes('1024'), true);
+      assert.equal(payload.error.message.includes('131072'), true);
+      assert.equal(
+        fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length,
+        generatedBefore
+      );
+    }
+
+    const boundaryCases = [
+      {
+        pathname: '/v1/responses',
+        body: { model: 'local-active', input: 'EXACT_BOUNDARY', stream: false, store: false, max_output_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/responses',
+        body: { model: 'local-active', input: 'EXACT_BOUNDARY', stream: true, store: false, max_output_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/chat/completions',
+        body: { model: 'local-active', messages: [{ role: 'user', content: 'EXACT_BOUNDARY' }], stream: false, max_tokens: 32768 }
+      },
+      {
+        pathname: '/v1/chat/completions',
+        body: { model: 'local-active', messages: [{ role: 'user', content: 'EXACT_BOUNDARY' }], stream: true, max_tokens: 32768 }
+      }
+    ];
+    for (const item of boundaryCases) {
+      const boundary = await post(fixture.apiPort, item.pathname, item.body);
+      assert.equal(boundary.status, 200);
+      await boundary.text();
+    }
+    assert.equal(
+      fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length,
+      boundaryCases.length
+    );
   } finally {
     await fixture.cleanup();
   }
@@ -1254,6 +1348,7 @@ test('discovery publishes the complete marker-owned reasoning contract without u
     const metadata = entry.x_ollama_router;
     assert.equal(metadata.schema_version, 2);
     assert.equal(metadata.complete, true);
+    assert.equal(metadata.context_safety_reserve, 1024);
     assert.deepEqual(metadata.reasoning, {
       supported: true,
       efforts: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' },

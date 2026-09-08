@@ -40,7 +40,7 @@ Configure Codex's custom Responses provider with the exact `ROUTER_MODEL_ALIAS`,
 
 The router now publishes the active alias and dynamic capabilities through `GET /v1/models/{alias}`, but it does not automatically reconfigure DeepSeek Harness. Harness requires a separate consumer-side enhancement.
 
-That consumer should configure only the stable alias, fetch its entry at startup and at the beginning of a new request or session, and use ETag revalidation. It should apply `context_window`, `max_output_tokens`, `input_modalities`, and reasoning metadata when available, retain last-safe limits or fall back conservatively when metadata is incomplete, and refresh safely after active-model changes. It must not persist `upstream_model` as its configured model ID. See [Stable Active-Model Discovery](MODEL_DISCOVERY.md) for the complete contract.
+That consumer should configure only the stable alias, fetch its entry at startup and at the beginning of a new request or session, and use ETag revalidation. It should apply `context_window`, `context_safety_reserve`, `max_output_tokens`, `input_modalities`, and reasoning metadata when available, retain last-safe limits or fall back conservatively when metadata is incomplete, and refresh safely after active-model changes. The reserve is an additive router-admission term, not model context or output capacity. It must not persist `upstream_model` as its configured model ID. See [Stable Active-Model Discovery](MODEL_DISCOVERY.md) for the complete contract.
 
 ## ComfyUI
 

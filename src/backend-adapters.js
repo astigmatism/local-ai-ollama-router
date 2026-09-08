@@ -8,6 +8,9 @@ const OLLAMA_KIND = 'ollama';
 const SAFE_POLICY_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
 const MAX_TOOL_ARGUMENT_DIAGNOSTIC_DELTAS = 64;
 
+export const OPENAI_CONTEXT_LENGTH_EXCEEDED_CODE = 'context_length_exceeded';
+export const DEFAULT_CONTEXT_SAFETY_RESERVE = 1024;
+
 export class BackendAdapterError extends Error {
   constructor(statusCode, code, message, param = null, diagnostics = null) {
     super(message);
@@ -31,6 +34,11 @@ function positiveInteger(value, fallback = null) {
 function nonNegativeInteger(value, fallback = null) {
   if (typeof value === 'string' && /^\d+$/.test(value.trim())) value = Number(value.trim());
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+export function enforcedContextSafetyReserve(activeModel) {
+  if ((activeModel?.backend_kind || OLLAMA_KIND) !== LLAMA_CPP_KIND) return null;
+  return nonNegativeInteger(activeModel?.context_safety_reserve, DEFAULT_CONTEXT_SAFETY_RESERVE);
 }
 
 function clonedConfig(config, upstreamUrl) {
@@ -1359,7 +1367,7 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
 
   async validateContext(messages, outputTokens, templateControls = {}) {
     const slotContext = positiveInteger(this.activeModel.context_length, 131072);
-    const reserve = positiveInteger(this.activeModel.context_safety_reserve, 1024);
+    const reserve = enforcedContextSafetyReserve(this.activeModel);
     let applied;
     try {
       applied = await upstreamJson(this.upstreamConfig, '/apply-template', {
@@ -1396,7 +1404,7 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     if (inputTokens + outputTokens + reserve > slotContext) {
       throw new BackendAdapterError(
         400,
-        'CONTEXT_LIMIT_EXCEEDED',
+        OPENAI_CONTEXT_LENGTH_EXCEEDED_CODE,
         `Formatted input (${inputTokens}) plus requested output (${outputTokens}) and safety reserve (${reserve}) exceeds the ${slotContext}-token slot.`,
         'messages'
       );
