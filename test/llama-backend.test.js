@@ -29,6 +29,25 @@ const REASONING_POLICY = {
   }
 };
 
+const QWEN38_REASONING_POLICY = {
+  schema_version: 1,
+  kind: 'llama_cpp_template_budgeted',
+  mapping_kind: 'qwen38_native_xhigh',
+  default_level: 'medium',
+  public_levels: ['off', 'low', 'medium', 'xhigh'],
+  aliases: { none: 'off', minimal: 'low', high: 'xhigh', max: 'xhigh' },
+  boolean_true_behavior: { mode: 'map', level: 'medium' },
+  output_limit_policy: 'cap',
+  reasoning_format: 'deepseek',
+  answer_reserve: 1024,
+  levels: {
+    off: { enabled: false, default_output_tokens: 512, max_output_tokens: 4096 },
+    low: { enabled: true, template_effort: 'low', reasoning_budget_tokens: 512, default_output_tokens: 1536, max_output_tokens: 1536 },
+    medium: { enabled: true, template_effort: 'medium', reasoning_budget_tokens: 2048, default_output_tokens: 3072, max_output_tokens: 8192 },
+    xhigh: { enabled: true, template_effort: 'xhigh', reasoning_budget_tokens: -1, default_output_tokens: 32768, max_output_tokens: 32768 }
+  }
+};
+
 async function readJsonBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -371,6 +390,150 @@ test('llama.cpp adapter forces model identity and translates native/OpenAI/Respo
     assert.ok(completions.every((request) => !Object.hasOwn(request.body, 'cache_prompt')));
     assert.ok(completions.every((request) => !Object.hasOwn(request.body, 'id_slot')));
     assert.ok(fixture.backend.requests.filter((request) => request.pathname === '/tokenize').length >= 4);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Responses preserves omitted and explicit temperatures in llama.cpp requests and structured metadata', async () => {
+  const fixture = await makeFixture();
+  try {
+    const cases = [
+      { label: 'omitted', forwarding: 'omitted_for_backend_default' },
+      { label: 'zero', temperature: 0, forwarding: 'explicit' },
+      { label: 'one', temperature: 1.0, forwarding: 'explicit' }
+    ];
+    for (const item of cases) {
+      const response = await post(fixture.apiPort, '/v1/responses', {
+        model: 'local-active',
+        input: `RESPONSES_TEMPERATURE_${item.label}`,
+        stream: false,
+        store: false,
+        max_output_tokens: 32,
+        ...(Object.hasOwn(item, 'temperature') ? { temperature: item.temperature } : {})
+      });
+      assert.equal(response.status, 200, await response.text());
+    }
+
+    const generation = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generation.length, 3);
+    assert.equal(Object.hasOwn(generation[0].body, 'temperature'), false);
+    assert.equal(generation[1].body.temperature, 0);
+    assert.equal(generation[2].body.temperature, 1);
+
+    const records = fixture.context.store.recentRequests(3).reverse();
+    assert.deepEqual(records.map((record) => record.temperatureForwarding), cases.map((item) => item.forwarding));
+    assert.equal(Object.hasOwn(records[0], 'forwardedTemperature'), false);
+    assert.deepEqual(records.slice(1).map((record) => record.forwardedTemperature), [0, 1]);
+
+    const generationCount = generation.length;
+    const invalid = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'RESPONSES_INVALID_TEMPERATURE',
+      stream: false,
+      store: false,
+      max_output_tokens: 32,
+      temperature: '1'
+    });
+    const invalidPayload = await invalid.json();
+    assert.equal(invalid.status, 400, JSON.stringify(invalidPayload));
+    assert.equal(invalidPayload.error.code, 'INVALID_TEMPERATURE');
+    assert.equal(invalidPayload.error.param, 'temperature');
+    assert.equal(
+      fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length,
+      generationCount
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('Chat Completions preserves omitted and explicit temperatures in llama.cpp requests and structured metadata', async () => {
+  const fixture = await makeFixture();
+  try {
+    const cases = [
+      { label: 'omitted', forwarding: 'omitted_for_backend_default' },
+      { label: 'zero', temperature: 0, forwarding: 'explicit' },
+      { label: 'one', temperature: 1.0, forwarding: 'explicit' }
+    ];
+    for (const item of cases) {
+      const response = await post(fixture.apiPort, '/v1/chat/completions', {
+        model: 'local-active',
+        messages: [{ role: 'user', content: `CHAT_TEMPERATURE_${item.label}` }],
+        stream: false,
+        max_tokens: 32,
+        ...(Object.hasOwn(item, 'temperature') ? { temperature: item.temperature } : {})
+      });
+      assert.equal(response.status, 200, await response.text());
+    }
+
+    const generation = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generation.length, 3);
+    assert.equal(Object.hasOwn(generation[0].body, 'temperature'), false);
+    assert.equal(generation[1].body.temperature, 0);
+    assert.equal(generation[2].body.temperature, 1);
+
+    const records = fixture.context.store.recentRequests(3).reverse();
+    assert.deepEqual(records.map((record) => record.temperatureForwarding), cases.map((item) => item.forwarding));
+    assert.equal(Object.hasOwn(records[0], 'forwardedTemperature'), false);
+    assert.deepEqual(records.slice(1).map((record) => record.forwardedTemperature), [0, 1]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test('temperature fix leaves max-to-xhigh, output caps, tools, and discovery unchanged', async () => {
+  const fixture = await makeFixture({
+    reasoning: true,
+    reasoningPolicy: QWEN38_REASONING_POLICY,
+    tools: true,
+    unsupportedToolsPolicy: 'reject',
+    maxOutputTokens: 32768
+  });
+  try {
+    const discoveryBefore = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
+    assert.equal(discoveryBefore.status, 200);
+    const beforePayload = await discoveryBefore.json();
+
+    const tool = {
+      type: 'function',
+      name: 'lookup',
+      description: 'Look up a value.',
+      parameters: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] }
+    };
+    const response = await post(fixture.apiPort, '/v1/responses', {
+      model: 'local-active',
+      input: 'QWEN38_REGRESSION_CONTRACT',
+      stream: false,
+      store: false,
+      reasoning: { effort: 'max' },
+      max_output_tokens: 50000,
+      tools: [tool]
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.equal(response.headers.get('x-router-effective-max-output-tokens'), '32768');
+
+    const upstream = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions')
+      .at(-1).body;
+    assert.equal(Object.hasOwn(upstream, 'temperature'), false);
+    assert.equal(upstream.reasoning_effort, 'xhigh');
+    assert.equal(upstream.max_tokens, 32768);
+    assert.deepEqual(upstream.tools, [{
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+      }
+    }]);
+
+    const discoveryAfter = await fetch(`http://127.0.0.1:${fixture.apiPort}/v1/models`);
+    assert.equal(discoveryAfter.status, 200);
+    assert.deepEqual(await discoveryAfter.json(), beforePayload);
+    assert.equal(beforePayload.data[0].x_ollama_router.reasoning.aliases.max, 'xhigh');
   } finally {
     await fixture.cleanup();
   }

@@ -1103,6 +1103,10 @@ function outcomeBase(started, pathname, body, activeModel, translated, toolPolic
     effectiveOutputTokens: translated?.effectiveOutputTokens ?? null,
     outputLimitCapped: translated?.outputLimitCapped ?? false,
     outputLimitPolicy: translated?.outputLimitPolicy ?? null,
+    temperatureForwarding: translated?.temperatureForwarding ?? null,
+    ...(translated && Object.hasOwn(translated, 'forwardedTemperature')
+      ? { forwardedTemperature: translated.forwardedTemperature }
+      : {}),
     toolsPresent: tools.toolsPresent,
     toolCount: tools.toolCount,
     toolChoicePresent: tools.toolChoicePresent,
@@ -1237,6 +1241,10 @@ export async function handleResponsesRequest(request, response, pathname, contex
         limit: backend.maxActiveRequests
       });
       backendRequest = backend.prepareResponses(translated);
+      translated.temperatureForwarding = backendRequest.temperatureForwarding ?? null;
+      if (Object.hasOwn(backendRequest, 'forwardedTemperature')) {
+        translated.forwardedTemperature = backendRequest.forwardedTemperature;
+      }
       if (backendRequest.reasoning) {
         Object.assign(translated, {
           reasoningEffort: backendRequest.reasoning.level,

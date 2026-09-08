@@ -394,6 +394,32 @@ test('request translation preserves instructions, message roles, images, JSON fo
   assert.equal(withContextShift.upstreamBody.shift, true);
 });
 
+test('Responses temperature validation retains the existing finite-number contract', () => {
+  const omitted = translateResponsesRequest({ input: 'omitted' }, 'active:model', -1);
+  const explicitNull = translateResponsesRequest({ input: 'null', temperature: null }, 'active:model', -1);
+  assert.equal(Object.hasOwn(omitted.upstreamBody.options || {}, 'temperature'), false);
+  assert.equal(Object.hasOwn(explicitNull.upstreamBody.options || {}, 'temperature'), false);
+
+  for (const invalidTemperature of ['1', Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.throws(
+      () => translateResponsesRequest({ input: 'invalid', temperature: invalidTemperature }, 'active:model', -1),
+      (error) => error instanceof ResponsesApiError
+        && error.statusCode === 400
+        && error.code === 'INVALID_TEMPERATURE'
+        && error.param === 'temperature'
+    );
+  }
+
+  for (const finiteTemperature of [-0.1, 2.1]) {
+    const translated = translateResponsesRequest(
+      { input: 'finite pass-through', temperature: finiteTemperature },
+      'active:model',
+      -1
+    );
+    assert.equal(translated.upstreamBody.options.temperature, finiteTemperature);
+  }
+});
+
 test('request translation merges multiple system and developer messages in their relative order', () => {
   const translated = translateResponsesRequest({
     input: [

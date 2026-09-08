@@ -36,6 +36,30 @@ function nonNegativeInteger(value, fallback = null) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+function llamaTemperature(body) {
+  const request = isPlainObject(body) ? body : {};
+  const options = isPlainObject(request.options) ? request.options : {};
+  const topLevelPresent = Object.hasOwn(request, 'temperature');
+  const optionPresent = Object.hasOwn(options, 'temperature');
+  if (!topLevelPresent && !optionPresent) {
+    return {
+      controls: {},
+      forwarding: 'omitted_for_backend_default'
+    };
+  }
+
+  // Retain the existing top-level/nullish precedence and finite-number
+  // normalization for explicitly supplied values. Presence is evaluated
+  // separately so an absent value is not converted into an explicit zero.
+  const parsed = Number(request.temperature ?? options.temperature ?? 0);
+  const forwardedTemperature = Number.isFinite(parsed) ? parsed : 0;
+  return {
+    controls: { temperature: forwardedTemperature },
+    forwarding: 'explicit',
+    forwardedTemperature
+  };
+}
+
 export function enforcedContextSafetyReserve(activeModel) {
   if ((activeModel?.backend_kind || OLLAMA_KIND) !== LLAMA_CPP_KIND) return null;
   return nonNegativeInteger(activeModel?.context_safety_reserve, DEFAULT_CONTEXT_SAFETY_RESERVE);
@@ -1452,13 +1476,13 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     );
     const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
     const context = await this.validateContext(mappedMessages, outputTokens, templateControls);
-    const temperature = Number(body?.temperature ?? body?.options?.temperature ?? 0);
+    const temperature = llamaTemperature(body);
     const upstreamBody = {
       model: this.activeModel.model,
       messages: mappedMessages,
       stream: body?.stream !== false,
       ...(body?.stream === false ? {} : { stream_options: { include_usage: true } }),
-      temperature: Number.isFinite(temperature) ? temperature : 0,
+      ...temperature.controls,
       max_tokens: outputTokens,
       ...reasoning.controls,
       ...toolRequest.controls,
@@ -1474,7 +1498,11 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       method: 'POST',
       context,
       reasoning,
-      templateControls
+      templateControls,
+      temperatureForwarding: temperature.forwarding,
+      ...(Object.hasOwn(temperature, 'forwardedTemperature')
+        ? { forwardedTemperature: temperature.forwardedTemperature }
+        : {})
     };
   }
 
@@ -1504,12 +1532,13 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       this.activeModel.capability_profile?.vision === true
     );
     const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
+    const temperature = llamaTemperature({ options: translated.upstreamBody?.options });
     const body = {
       model: this.activeModel.model,
       messages,
       stream: translated.stream,
       ...(translated.stream ? { stream_options: { include_usage: true } } : {}),
-      temperature: translated.upstreamBody?.options?.temperature ?? 0,
+      ...temperature.controls,
       max_tokens: outputTokens,
       ...reasoning.controls,
       ...toolRequest.controls
@@ -1520,7 +1549,11 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       responseKind: 'openai',
       outputTokens,
       reasoning,
-      templateControls
+      templateControls,
+      temperatureForwarding: temperature.forwarding,
+      ...(Object.hasOwn(temperature, 'forwardedTemperature')
+        ? { forwardedTemperature: temperature.forwardedTemperature }
+        : {})
     };
   }
 

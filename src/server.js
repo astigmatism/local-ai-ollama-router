@@ -915,6 +915,14 @@ async function handleProxy(request, response, url, context) {
           outputLimitCapped: prepared.reasoning.outputLimitCapped,
           outputLimitPolicy: prepared.reasoning.outputLimitPolicy
         });
+        if (prepared.temperatureForwarding) {
+          Object.assign(commonRecord, {
+            temperatureForwarding: prepared.temperatureForwarding,
+            ...(Object.hasOwn(prepared, 'forwardedTemperature')
+              ? { forwardedTemperature: prepared.forwardedTemperature }
+              : {})
+          });
+        }
         if (prepared.reasoning.outputLimitCapped) {
           await persistEvent(context.store, {
             type: 'output_limit_capped',

@@ -2,12 +2,33 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BackendAdapterError,
+  LlamaCppBackendAdapter,
   normalizeLlamaReasoningRequest,
   normalizeOpenAiSseModel,
   normalizeOutputLimit,
   openAiCompletionToOllama,
   openAiSseToOllamaStream
 } from '../src/backend-adapters.js';
+
+const nonReasoningLlamaModel = {
+  backend_kind: 'llama_cpp',
+  model: 'adapter-unit-model',
+  default_output_tokens: 512,
+  max_output_tokens: 4096,
+  capability_profile: { reasoning: false, tools: false, vision: false }
+};
+
+function prepareResponsesTemperature(options) {
+  const adapter = new LlamaCppBackendAdapter({}, nonReasoningLlamaModel);
+  return adapter.prepareResponses({
+    originalBody: { input: 'adapter unit input' },
+    upstreamBody: {
+      messages: [{ role: 'user', content: 'adapter unit input' }],
+      ...(options === undefined ? {} : { options })
+    },
+    stream: false
+  });
+}
 
 const reasoningModel = {
   default_output_tokens: 512,
@@ -36,6 +57,28 @@ const reasoningModel = {
 async function streamText(stream) {
   return await new Response(stream).text();
 }
+
+test('llama.cpp Responses adapter omits temperature when the translated request omits it', () => {
+  const prepared = prepareResponsesTemperature(undefined);
+  assert.equal(Object.hasOwn(prepared.body, 'temperature'), false);
+  assert.equal(prepared.temperatureForwarding, 'omitted_for_backend_default');
+  assert.equal(Object.hasOwn(prepared, 'forwardedTemperature'), false);
+});
+
+test('llama.cpp Responses adapter preserves explicit temperature zero', () => {
+  const prepared = prepareResponsesTemperature({ temperature: 0 });
+  assert.equal(prepared.body.temperature, 0);
+  assert.equal(prepared.temperatureForwarding, 'explicit');
+  assert.equal(prepared.forwardedTemperature, 0);
+});
+
+test('llama.cpp Responses adapter preserves explicit finite temperatures', () => {
+  for (const value of [1.0, 0.37]) {
+    const prepared = prepareResponsesTemperature({ temperature: value });
+    assert.equal(prepared.body.temperature, value);
+    assert.equal(prepared.forwardedTemperature, value);
+  }
+});
 
 test('normalizes bounded output limits without changing Ollama profiles globally', () => {
   const marker = { default_output_tokens: 512, max_output_tokens: 4096 };
