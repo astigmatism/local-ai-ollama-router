@@ -36,6 +36,8 @@ A `llama_cpp` profile may set `capability_profile.vision: true` only after the m
 
 Configure Codex's custom Responses provider with the exact `ROUTER_MODEL_ALIAS`, normally `model = "local-active"`. Codex may retain that identifier across profile changes: request history records it as `requestedModel`, while `activeModel` and `forwardedModel` show the marker model that Ollama actually received. The alias works in strict mode; `REWRITE_REQUESTED_MODEL_TO_ACTIVE=true` is needed only if other arbitrary names should also be advisory.
 
+Codex may send the documented Responses `prompt_cache_key` optimization hint. The router accepts string values for API compatibility and intentionally ignores them for local inference. It does not forward the value or provide key-partitioned response caching; llama.cpp's ordinary prompt-prefix/KV reuse remains the only local prompt-cache behavior. The raw key is excluded from request history and events.
+
 ## DeepSeek Harness
 
 The router now publishes the active alias and dynamic capabilities through `GET /v1/models/{alias}`, but it does not automatically reconfigure DeepSeek Harness. Harness requires a separate consumer-side enhancement.

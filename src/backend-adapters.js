@@ -102,7 +102,11 @@ const UNSUPPORTED_CONTROL_FIELDS = new Set([
   'speculative',
   'id_slot',
   'cache_prompt',
+  // Responses strips prompt_cache_key only after strict string validation.
+  // Keep the backend guard so it cannot leak through another public protocol.
   'prompt_cache_key',
+  'prompt_cache_options',
+  'prompt_cache_retention',
   'cache_id',
   'cache_ram',
   'cache_idle_slots',

@@ -29,6 +29,8 @@ This is enforced at the router so individual clients do not need to remember or 
 
 `src/responses-api.js` owns the isolated OpenAI Responses compatibility path. `/v1/responses` and `/responses` are dispatched before the generic `/api/*` proxy, translated only to Ollama `/api/chat`, and validated directly against the active-model marker. The module honors `REWRITE_REQUESTED_MODEL_TO_ACTIVE` for client-name compatibility but does not call the legacy proxy-policy evaluator: permissive and allowlist settings cannot change the single marker-model upstream target.
 
+Responses accepts the documented optional `prompt_cache_key` string as a compatibility hint. Its value is validated and then removed before response construction and backend-policy processing. It is never forwarded to Ollama or llama.cpp, does not choose a model or slot, and is not a router response-cache key; backend prompt-prefix/KV reuse remains authoritative. Request telemetry records only presence and the `accepted_ignored` disposition. `prompt_cache_options` and deprecated `prompt_cache_retention` remain unsupported unless separately implemented against proven backend semantics.
+
 ### Policy engine
 
 `src/policy.js` validates model requests. The default policy is `active-only`:
@@ -110,6 +112,7 @@ Fields include:
 - active model at request time
 - forwarded model and whether the request identifier was rewritten
 - incoming and forwarded `keep_alive`
+- whether a Responses `prompt_cache_key` was present and, when valid, that it was accepted and ignored
 - incoming `think`, incoming Responses reasoning effort, forwarded `think`, mapping/drop state, and the effective reasoning effort
 - allow/reject state
 - upstream response status

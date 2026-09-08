@@ -65,6 +65,13 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function withoutPromptCacheKey(body) {
+  if (!Object.hasOwn(body, 'prompt_cache_key')) return body;
+  const sanitized = { ...body };
+  delete sanitized.prompt_cache_key;
+  return sanitized;
+}
+
 function normalizeTextValue(value, param) {
   if (typeof value === 'string') return value;
   if (value === null || value === undefined) return '';
@@ -477,6 +484,14 @@ export function translateResponsesRequest(
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
     invalid('STATEFUL_REQUEST_UNSUPPORTED', 'previous_response_id is unsupported; resend the full input history.', 'previous_response_id');
   }
+  const promptCacheKeyPresent = Object.hasOwn(body, 'prompt_cache_key');
+  if (promptCacheKeyPresent && typeof body.prompt_cache_key !== 'string') {
+    invalid('INVALID_PROMPT_CACHE_KEY', 'prompt_cache_key must be a string when provided.', 'prompt_cache_key');
+  }
+  // This is an OpenAI API compatibility hint, not a local cache namespace.
+  // Remove it before any response construction or backend-policy processing so
+  // its value cannot affect inference, llama.cpp slot selection, or telemetry.
+  const compatibilityBody = withoutPromptCacheKey(body);
   if (body.model !== undefined && (typeof body.model !== 'string' || !body.model.trim())) {
     invalid('INVALID_MODEL', 'model must be a non-empty string when provided.', 'model');
   }
@@ -531,7 +546,9 @@ export function translateResponsesRequest(
     toolChoice: translatedTools.toolChoice,
     parallelToolCalls: body.parallel_tool_calls ?? true,
     toolNames: translatedTools.toolNames,
-    requestBody: body
+    requestBody: compatibilityBody,
+    promptCacheKeyPresent,
+    promptCacheKeyDisposition: promptCacheKeyPresent ? 'accepted_ignored' : null
   };
 }
 
@@ -1107,6 +1124,9 @@ function outcomeBase(started, pathname, body, activeModel, translated, toolPolic
     ...(translated && Object.hasOwn(translated, 'forwardedTemperature')
       ? { forwardedTemperature: translated.forwardedTemperature }
       : {}),
+    promptCacheKeyPresent: translated?.promptCacheKeyPresent
+      ?? (isPlainObject(body) && Object.hasOwn(body, 'prompt_cache_key')),
+    promptCacheKeyDisposition: translated?.promptCacheKeyDisposition ?? null,
     toolsPresent: tools.toolsPresent,
     toolCount: tools.toolCount,
     toolChoicePresent: tools.toolChoicePresent,
@@ -1229,7 +1249,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.toolsSupported = toolPolicy.toolsSupported;
     translated.toolsDropped = toolPolicy.toolsDropped;
     translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
-    translated.originalBody = toolPolicy.body;
+    translated.originalBody = translated.requestBody;
     let backendRequest;
     try {
       // Template application/tokenization is part of an accepted generation

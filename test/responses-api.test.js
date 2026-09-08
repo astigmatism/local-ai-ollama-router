@@ -420,6 +420,40 @@ test('Responses temperature validation retains the existing finite-number contra
   }
 });
 
+test('Responses prompt_cache_key accepts only strings and is removed before translation', () => {
+  const base = {
+    model: 'active:model',
+    input: 'same input',
+    stream: false,
+    store: false,
+    temperature: 0,
+    max_output_tokens: 32
+  };
+  const omitted = translateResponsesRequest(base, 'active:model', -1);
+  assert.equal(omitted.promptCacheKeyPresent, false);
+  assert.equal(omitted.promptCacheKeyDisposition, null);
+  assert.equal(Object.hasOwn(omitted.requestBody, 'prompt_cache_key'), false);
+
+  for (const promptCacheKey of ['', 'codex-session-0123456789abcdef', 'scope/α β\tline']) {
+    const accepted = translateResponsesRequest({ ...base, prompt_cache_key: promptCacheKey }, 'active:model', -1);
+    assert.deepEqual(accepted.upstreamBody, omitted.upstreamBody);
+    assert.equal(accepted.promptCacheKeyPresent, true);
+    assert.equal(accepted.promptCacheKeyDisposition, 'accepted_ignored');
+    assert.equal(Object.hasOwn(accepted.requestBody, 'prompt_cache_key'), false);
+  }
+
+  for (const promptCacheKey of [null, false, 0, [], {}]) {
+    assert.throws(
+      () => translateResponsesRequest({ ...base, prompt_cache_key: promptCacheKey }, 'active:model', -1),
+      (error) => error instanceof ResponsesApiError
+        && error.statusCode === 400
+        && error.code === 'INVALID_PROMPT_CACHE_KEY'
+        && error.param === 'prompt_cache_key'
+        && !error.message.includes(JSON.stringify(promptCacheKey))
+    );
+  }
+});
+
 test('request translation merges multiple system and developer messages in their relative order', () => {
   const translated = translateResponsesRequest({
     input: [

@@ -22,6 +22,8 @@ The test suite validates:
 - legacy same-port admin auth behavior
 - Ollama-compatible API pass-through and keep-alive preservation/rewriting behavior
 - Responses request/message/tool translation
+- Responses `prompt_cache_key` string validation, accepted-but-not-forwarded semantics, non-caching behavior, and raw-value exclusion from responses, backend JSON, request/event history, and persisted logs
+- explicit continued rejection of unimplemented adjacent `prompt_cache_options` and deprecated `prompt_cache_retention` fields
 - day/night profile-specific reasoning negotiation across native chat/generate and Responses, including nighttime `high`/`xhigh`/`max` → boolean `true`, low/medium, defaults, streaming, and non-streaming
 - a strict Ollama 0.32.13-style fake that rejects string `"xhigh"`, while successful Responses return visible reasoning and answer output
 - binary reasoning fallback when profile metadata is missing, plus rejection of malformed, incomplete, or inconsistent explicit profiles before Ollama generation

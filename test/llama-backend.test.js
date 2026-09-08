@@ -487,6 +487,108 @@ test('Responses preserves omitted and explicit temperatures in llama.cpp request
   }
 });
 
+test('Responses accepts prompt_cache_key as a privacy-safe ignored hint without local response caching', async () => {
+  const fixture = await makeFixture();
+  const codexStyleKey = 'codex-session-0123456789abcdef';
+  const unusualKey = 'scope/α β\tline';
+  const invalidMarker = 'invalid-cache-key-must-not-escape';
+  try {
+    const base = {
+      model: 'local-active',
+      input: 'PROMPT_CACHE_EQUIVALENCE',
+      stream: false,
+      store: false,
+      max_output_tokens: 32
+    };
+    const responseTexts = [];
+    for (const body of [
+      base,
+      { ...base, prompt_cache_key: codexStyleKey },
+      { ...base, prompt_cache_key: unusualKey }
+    ]) {
+      const response = await post(fixture.apiPort, '/v1/responses', body);
+      const responseText = await response.text();
+      assert.equal(response.status, 200, responseText);
+      responseTexts.push(responseText);
+    }
+
+    const streaming = await post(fixture.apiPort, '/v1/responses', {
+      ...base,
+      input: 'PROMPT_CACHE_STREAM',
+      stream: true,
+      prompt_cache_key: ''
+    });
+    const streamingText = await streaming.text();
+    assert.equal(streaming.status, 200, streamingText);
+    assert.match(streamingText, /response\.completed/);
+
+    const generation = fixture.backend.requests
+      .filter((request) => request.pathname === '/v1/chat/completions');
+    assert.equal(generation.length, 4, 'each request must perform a separate backend generation');
+    assert.deepEqual(generation[1].body, generation[0].body);
+    assert.deepEqual(generation[2].body, generation[0].body);
+    assert.ok(generation.every((request) => !Object.hasOwn(request.body, 'prompt_cache_key')));
+    assert.doesNotMatch(JSON.stringify(fixture.backend.requests), /codex-session|scope\/α/);
+    assert.doesNotMatch(responseTexts.join('\n'), /codex-session|scope\/α/);
+    assert.doesNotMatch(streamingText, /codex-session|scope\/α/);
+
+    for (let attempt = 0; attempt < 100 && fixture.context.store.recentRequests(10).length < 4; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const records = fixture.context.store.recentRequests(4).reverse();
+    assert.deepEqual(records.map((record) => record.promptCacheKeyPresent), [false, true, true, true]);
+    assert.deepEqual(records.map((record) => record.promptCacheKeyDisposition), [null, 'accepted_ignored', 'accepted_ignored', 'accepted_ignored']);
+    assert.doesNotMatch(JSON.stringify(records), /codex-session|scope\/α/);
+
+    const invalid = await post(fixture.apiPort, '/v1/responses', {
+      ...base,
+      prompt_cache_key: { private: invalidMarker }
+    });
+    const invalidText = await invalid.text();
+    assert.equal(invalid.status, 400, invalidText);
+    const invalidPayload = JSON.parse(invalidText);
+    assert.deepEqual(invalidPayload.error, {
+      message: 'prompt_cache_key must be a string when provided.',
+      type: 'invalid_request_error',
+      param: 'prompt_cache_key',
+      code: 'INVALID_PROMPT_CACHE_KEY'
+    });
+    assert.doesNotMatch(invalidText, new RegExp(invalidMarker));
+    const rejectedEvent = await waitForEvent(
+      fixture,
+      (event) => event.type === 'responses_request_rejected' && event.code === 'INVALID_PROMPT_CACHE_KEY'
+    );
+    assert.doesNotMatch(JSON.stringify(rejectedEvent), new RegExp(invalidMarker));
+
+    const generationCount = generation.length;
+    for (const [field, value] of [
+      ['prompt_cache_options', { mode: 'explicit', ttl: '30m' }],
+      ['prompt_cache_retention', '24h']
+    ]) {
+      const response = await post(fixture.apiPort, '/v1/responses', { ...base, [field]: value });
+      const payload = await response.json();
+      assert.equal(response.status, 400, JSON.stringify(payload));
+      assert.equal(payload.error.code, 'UNSUPPORTED_PROFILE_CAPABILITY');
+      assert.equal(payload.error.param, field);
+    }
+    assert.equal(
+      fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length,
+      generationCount
+    );
+
+    const stored = JSON.stringify({
+      requests: fixture.context.store.recentRequests(20),
+      events: fixture.context.store.recentEvents(20)
+    });
+    assert.doesNotMatch(stored, /codex-session|scope\/α|invalid-cache-key-must-not-escape/);
+    const paths = fixture.context.store.paths();
+    const persisted = `${await fs.readFile(paths.requestLogPath, 'utf8')}\n${await fs.readFile(paths.eventLogPath, 'utf8')}`;
+    assert.doesNotMatch(persisted, /codex-session|scope\/α|invalid-cache-key-must-not-escape/);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test('Chat Completions preserves omitted and explicit temperatures in llama.cpp requests and structured metadata', async () => {
   const fixture = await makeFixture();
   try {
@@ -1486,6 +1588,7 @@ test('llama.cpp marker-enabled tools round-trip through native, Chat Completions
     const responses = await post(fixture.apiPort, '/v1/responses', {
       model: 'local-active',
       input: 'CALL_TOOL using bash.',
+      prompt_cache_key: 'codex-tool-turn-1',
       tools: responsesTools,
       stream: false,
       store: false,
@@ -1506,6 +1609,7 @@ test('llama.cpp marker-enabled tools round-trip through native, Chat Completions
         functionCall,
         { type: 'function_call_output', call_id: functionCall.call_id, output: '/workspace' }
       ],
+      prompt_cache_key: 'codex-tool-turn-2',
       tools: responsesTools,
       stream: false,
       store: false,
@@ -1518,6 +1622,7 @@ test('llama.cpp marker-enabled tools round-trip through native, Chat Completions
     const streaming = await post(fixture.apiPort, '/v1/responses', {
       model: 'local-active',
       input: 'STREAM CALL_TOOL using bash.',
+      prompt_cache_key: 'codex-tool-stream',
       tools: responsesTools,
       stream: true,
       store: false,
@@ -1544,6 +1649,7 @@ test('llama.cpp marker-enabled tools round-trip through native, Chat Completions
     assert.equal(generationRequests[1].body.messages[2].tool_call_id, 'call_router_1_0');
     assert.equal(generationRequests[2].body.tool_choice, 'auto');
     assert.equal(generationRequests[2].body.parallel_tool_calls, false);
+    assert.ok(generationRequests.every((request) => !Object.hasOwn(request.body, 'prompt_cache_key')));
 
     const templateRequests = fixture.backend.requests.filter((request) => request.pathname === '/apply-template');
     assert.equal(templateRequests.length, 7);
