@@ -1,0 +1,425 @@
+{
+  "profile": "primary",
+  "model": "qwen3.8-27b-q8_0",
+  "model_policy": {
+    "mode": "catalog",
+    "rewrite_requested_to_active": false,
+    "management_enabled": false
+  },
+  "keep_alive": -1,
+  "context_length": 131072,
+  "backend_kind": "llama_cpp",
+  "backend_url": "http://qwen38-daytime:8080",
+  "backend_revision": "8ea290247c87ced2ab245b056ffe96dbcf90d36c",
+  "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "total_context_length": 131072,
+  "max_active_requests": 1,
+  "max_output_tokens": null,
+  "default_output_tokens": null,
+  "context_safety_reserve": 1024,
+  "gpu_uuids": [
+    "GPU-358353dd-5933-1dc6-ac0d-e1189b063e4c",
+    "GPU-e4252fcb-8ed4-ef11-71cd-d36a23871c75"
+  ],
+  "fit_target": "off",
+  "model_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-Q8_0.gguf",
+  "mmproj_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-F16.gguf",
+  "mmproj_revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "mmproj_offload": "cpu",
+  "quantization": "Q8_0",
+  "context_shift": false,
+  "global_ram_prompt_cache": true,
+  "slot_prefix_reuse": true,
+  "kv_cache": {
+    "unified": false,
+    "key_type": "q8_0",
+    "value_type": "q8_0"
+  },
+  "input_modalities": [
+    "text",
+    "image"
+  ],
+  "prompt_cache_mode": "volatile_slot_lcp_and_host_ram",
+  "reasoning_policy": {
+    "schema_version": 2,
+    "default_level": "default",
+    "aliases": {
+      "none": "off",
+      "minimal": "low",
+      "high": "xhigh",
+      "max": "xhigh"
+    },
+    "boolean_true_behavior": {
+      "mode": "map",
+      "level": "default"
+    },
+    "output_limit_policy": "reject",
+    "answer_reserve": 0,
+    "reasoning_format": "deepseek",
+    "levels": {
+      "default": {
+        "enabled": true,
+        "template_effort": "default",
+        "default_output_tokens": null,
+        "max_output_tokens": null,
+        "reasoning_budget_tokens": -1
+      },
+      "off": {
+        "enabled": false,
+        "default_output_tokens": null,
+        "max_output_tokens": null
+      },
+      "low": {
+        "enabled": true,
+        "template_effort": "low",
+        "reasoning_budget_tokens": -1,
+        "default_output_tokens": null,
+        "max_output_tokens": null
+      },
+      "medium": {
+        "enabled": true,
+        "template_effort": "medium",
+        "reasoning_budget_tokens": -1,
+        "default_output_tokens": null,
+        "max_output_tokens": null
+      },
+      "xhigh": {
+        "enabled": true,
+        "template_effort": "xhigh",
+        "reasoning_budget_tokens": -1,
+        "default_output_tokens": null,
+        "max_output_tokens": null
+      }
+    }
+  },
+  "mtp": {
+    "enabled": true,
+    "type": "draft-mtp",
+    "model_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+    "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+    "quantization": "Q4_0",
+    "max_draft_tokens": 3,
+    "gpu_layers": "all",
+    "device": "CUDA1",
+    "key_cache_type": "q8_0",
+    "value_cache_type": "q8_0"
+  },
+  "capability_profile": {
+    "name": "qwen38-27b-golden-vision-tools",
+    "text": true,
+    "streaming": true,
+    "vision": true,
+    "tools": true,
+    "reasoning": true,
+    "speculative": true,
+    "prompt_cache_volatile": true,
+    "prompt_cache_persistence": false
+  },
+  "deployment_warnings": [],
+  "updated_at": "2026-09-12T04:40:39.571770+00:00",
+  "source": "local-ai-primary/model-catalog.json",
+  "supported_think_levels": [
+    "default",
+    "off",
+    "low",
+    "medium",
+    "xhigh"
+  ],
+  "reasoning_effort_map": {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "xhigh",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+    "default": "default"
+  },
+  "aliases": [
+    "local-active"
+  ],
+  "server_default_output_tokens": -1,
+  "schema_version": 3,
+  "default_model": "qwen3.8-27b-q8_0",
+  "models": [
+    {
+      "profile": "primary",
+      "model": "qwen3.8-27b-q8_0",
+      "model_policy": {
+        "mode": "catalog",
+        "rewrite_requested_to_active": false,
+        "management_enabled": false
+      },
+      "keep_alive": -1,
+      "context_length": 131072,
+      "backend_kind": "llama_cpp",
+      "backend_url": "http://qwen38-daytime:8080",
+      "backend_revision": "8ea290247c87ced2ab245b056ffe96dbcf90d36c",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "total_context_length": 131072,
+      "max_active_requests": 1,
+      "max_output_tokens": null,
+      "default_output_tokens": null,
+      "context_safety_reserve": 1024,
+      "gpu_uuids": [
+        "GPU-358353dd-5933-1dc6-ac0d-e1189b063e4c",
+        "GPU-e4252fcb-8ed4-ef11-71cd-d36a23871c75"
+      ],
+      "fit_target": "off",
+      "model_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-Q8_0.gguf",
+      "mmproj_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-F16.gguf",
+      "mmproj_revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "mmproj_offload": "cpu",
+      "quantization": "Q8_0",
+      "context_shift": false,
+      "global_ram_prompt_cache": true,
+      "slot_prefix_reuse": true,
+      "kv_cache": {
+        "unified": false,
+        "key_type": "q8_0",
+        "value_type": "q8_0"
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "prompt_cache_mode": "volatile_slot_lcp_and_host_ram",
+      "reasoning_policy": {
+        "schema_version": 2,
+        "default_level": "default",
+        "aliases": {
+          "none": "off",
+          "minimal": "low",
+          "high": "xhigh",
+          "max": "xhigh"
+        },
+        "boolean_true_behavior": {
+          "mode": "map",
+          "level": "default"
+        },
+        "output_limit_policy": "reject",
+        "answer_reserve": 0,
+        "reasoning_format": "deepseek",
+        "levels": {
+          "default": {
+            "enabled": true,
+            "template_effort": "default",
+            "default_output_tokens": null,
+            "max_output_tokens": null,
+            "reasoning_budget_tokens": -1
+          },
+          "off": {
+            "enabled": false,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "low": {
+            "enabled": true,
+            "template_effort": "low",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "medium": {
+            "enabled": true,
+            "template_effort": "medium",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "xhigh": {
+            "enabled": true,
+            "template_effort": "xhigh",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          }
+        }
+      },
+      "mtp": {
+        "enabled": true,
+        "type": "draft-mtp",
+        "model_path": "/home/astigmatism/ai/models/llm/Qwen3.8-27B-GGUF/revisions/4ca720788d1e01f1bff70c033e0d0028fd02e502/MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+        "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+        "quantization": "Q4_0",
+        "max_draft_tokens": 3,
+        "gpu_layers": "all",
+        "device": "CUDA1",
+        "key_cache_type": "q8_0",
+        "value_cache_type": "q8_0"
+      },
+      "capability_profile": {
+        "name": "qwen38-27b-golden-vision-tools",
+        "text": true,
+        "streaming": true,
+        "vision": true,
+        "tools": true,
+        "reasoning": true,
+        "speculative": true,
+        "prompt_cache_volatile": true,
+        "prompt_cache_persistence": false
+      },
+      "deployment_warnings": [],
+      "updated_at": "2026-09-12T04:40:39.571770+00:00",
+      "source": "local-ai-primary/model-catalog.json",
+      "supported_think_levels": [
+        "default",
+        "off",
+        "low",
+        "medium",
+        "xhigh"
+      ],
+      "reasoning_effort_map": {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "xhigh",
+        "xhigh": "xhigh",
+        "max": "xhigh",
+        "default": "default"
+      },
+      "aliases": [
+        "local-active"
+      ],
+      "server_default_output_tokens": -1,
+      "output_policy": "unrestricted",
+      "global_ram_prompt_cache_mib": 8192,
+      "slot_save_path": null,
+      "display_name": "Daytime (128K)"
+    },
+    {
+      "profile": "primary",
+      "model": "qwen3.8-27b-abliterated-q6_k",
+      "model_policy": {
+        "mode": "catalog",
+        "rewrite_requested_to_active": false,
+        "management_enabled": false
+      },
+      "keep_alive": -1,
+      "context_length": 32768,
+      "backend_kind": "llama_cpp",
+      "backend_url": "http://qwen38-nighttime:8080",
+      "backend_revision": "8ea290247c87ced2ab245b056ffe96dbcf90d36c",
+      "revision": "efb07baa690a1bc7beb53ee067b4b57c7025b5e7",
+      "total_context_length": 32768,
+      "max_active_requests": 1,
+      "max_output_tokens": null,
+      "default_output_tokens": null,
+      "context_safety_reserve": 1024,
+      "gpu_uuids": [
+        "GPU-b0c40094-4d7a-fe22-3995-664a81ee7e33",
+        "GPU-1b086490-b005-bb23-c581-be392b42688d"
+      ],
+      "fit_target": "off",
+      "model_path": "/home/astigmatism/ai/models/llm/windowsxp811203/Qwen3.8-27B-Abliterated-GGUF/revisions/efb07baa690a1bc7beb53ee067b4b57c7025b5e7/Qwen3.8-27B-Abliterated-Q6_K.gguf",
+      "quantization": "Q6_K",
+      "context_shift": false,
+      "global_ram_prompt_cache": true,
+      "slot_prefix_reuse": true,
+      "kv_cache": {
+        "unified": false,
+        "key_type": "q8_0",
+        "value_type": "q8_0"
+      },
+      "input_modalities": [
+        "text"
+      ],
+      "prompt_cache_mode": "volatile_slot_lcp_and_host_ram",
+      "reasoning_policy": {
+        "schema_version": 2,
+        "default_level": "default",
+        "aliases": {
+          "none": "off",
+          "minimal": "low",
+          "high": "xhigh",
+          "max": "xhigh"
+        },
+        "boolean_true_behavior": {
+          "mode": "map",
+          "level": "default"
+        },
+        "output_limit_policy": "reject",
+        "answer_reserve": 0,
+        "reasoning_format": "deepseek",
+        "levels": {
+          "default": {
+            "enabled": true,
+            "template_effort": "default",
+            "default_output_tokens": null,
+            "max_output_tokens": null,
+            "reasoning_budget_tokens": -1
+          },
+          "off": {
+            "enabled": false,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "low": {
+            "enabled": true,
+            "template_effort": "low",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "medium": {
+            "enabled": true,
+            "template_effort": "medium",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          },
+          "xhigh": {
+            "enabled": true,
+            "template_effort": "xhigh",
+            "reasoning_budget_tokens": -1,
+            "default_output_tokens": null,
+            "max_output_tokens": null
+          }
+        }
+      },
+      "mtp": {
+        "enabled": false
+      },
+      "capability_profile": {
+        "name": "qwen38-27b-abliterated-text-reasoning",
+        "text": true,
+        "streaming": true,
+        "vision": false,
+        "tools": false,
+        "reasoning": true,
+        "speculative": false,
+        "prompt_cache_volatile": true,
+        "prompt_cache_persistence": false
+      },
+      "deployment_warnings": [],
+      "updated_at": "2026-09-12T04:40:39.571770+00:00",
+      "source": "local-ai-primary/model-catalog.json",
+      "supported_think_levels": [
+        "default",
+        "off",
+        "low",
+        "medium",
+        "xhigh"
+      ],
+      "reasoning_effort_map": {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "xhigh",
+        "xhigh": "xhigh",
+        "max": "xhigh",
+        "default": "default"
+      },
+      "aliases": [],
+      "server_default_output_tokens": -1,
+      "artifact": "windowsxp811203/Qwen3.8-27B-Abliterated-GGUF Q6_K",
+      "output_policy": "unrestricted",
+      "global_ram_prompt_cache_mib": 8192,
+      "slot_save_path": null,
+      "display_name": "Nighttime (32K)"
+    }
+  ],
+  "output_policy": "unrestricted",
+  "global_ram_prompt_cache_mib": 8192,
+  "slot_save_path": null,
+  "display_name": "Daytime (128K)"
+}

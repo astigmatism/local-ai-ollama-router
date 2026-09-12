@@ -1,3 +1,7 @@
+> Primary integration adds `src/model-catalog.js`: one atomic schema-v3 marker, canonical entries plus deliberate aliases, and a selected snapshot retained through every request. RequestGate counts leases by upstream identity and keeps global drain accounting. Legacy single-marker behavior below remains available for explicit recovery. See [Primary integration](PRIMARY_INTEGRATION.md).
+
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
 # Architecture
 
 ## Goal

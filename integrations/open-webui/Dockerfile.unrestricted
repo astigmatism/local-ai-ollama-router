@@ -1,0 +1,5 @@
+# Extends the installed image, preserving its folder-scoped knowledge patch.
+FROM local/open-webui:0.11.3-folder-scoped-knowledge-v1
+COPY router_completion.py patch-unrestricted-policy.py test-unrestricted-policy.py /tmp/router-policy/
+RUN python /tmp/router-policy/patch-unrestricted-policy.py && WEBUI_SECRET_KEY=build-verification-only-8fcc2a00fba04d4ca5a421ba PYTHONPATH=/app/backend python /tmp/router-policy/test-unrestricted-policy.py
+LABEL local.open-webui.router-policy="unrestricted-terminal-v1"

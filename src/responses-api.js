@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { readActiveModel } from './active-model.js';
+import { selectModel } from './model-catalog.js';
 import { parseJsonBuffer, readRequestBody, sendJson, summarizeBody } from './http-utils.js';
 import { createModelCapabilityLookup, normalizeThinkForModel, upstreamFetch } from './upstream.js';
 import { createToolCapabilityLookup, emptyToolPolicy, normalizeToolsForModel } from './native-tools.js';
-import { BackendAdapterError, resolveBackendAdapter } from './backend-adapters.js';
+import { BackendAdapterError, resolveBackendAdapter, fetchPrepared } from './backend-adapters.js';
 import { RequestGateError } from './request-gate.js';
+import { queueHeartbeat, endQueuedError } from './queue-response.js';
 import {
   RESPONSES_REASONING_EFFORTS,
   thinkLevelToReasoningEffort,
@@ -691,7 +692,10 @@ export function translateOllamaResponse(
     }
     callIds.add(toolCall.call_id);
   }
-  if (!text.trim() && !toolCalls.length) {
+  const incompleteReason = payload.x_router?.stop_reason === 'context_length_exceeded' ? 'context_length_exceeded'
+    : payload.done_reason === 'length' ? 'max_output_tokens'
+    : !payload.done || !['stop', 'tool_calls', 'function_call'].includes(payload.done_reason) ? 'upstream_incomplete' : null;
+  if (!incompleteReason && !text.trim() && !toolCalls.length) {
     throw new ResponsesApiError(
       502,
       'EMPTY_UPSTREAM_RESPONSE',
@@ -704,16 +708,22 @@ export function translateOllamaResponse(
   if (thinking) output.push(reasoningOutputItem(thinking));
   if (text) output.push(messageOutputItem(text));
   output.push(...toolCalls);
+  for (const call of payload.x_router?.partial_tool_calls ?? []) output.push({
+    id: newId('fc'), type: 'function_call', status: 'incomplete', call_id: call.id, name: call.function.name, arguments: call.function.arguments
+  });
   return {
-    ...responseShell(requestBody, activeModel, responseId, createdAt, 'completed'),
-    output,
+    ...responseShell(requestBody, activeModel, responseId, createdAt, incompleteReason ? 'incomplete' : 'completed'),
+    ...(incompleteReason ? { incomplete_details: { reason: incompleteReason } } : {}),
+    ...(payload.x_router ? { x_router: payload.x_router } : {}),
+    output: incompleteReason ? output.map((item) => ({ ...item, status: 'incomplete' })) : output,
     usage: usageFromOllama(payload, Boolean(thinking))
   };
 }
 
 class SseWriter {
-  constructor(response) {
+  constructor(response, signal) {
     this.response = response;
+    this.signal = signal;
     this.sequenceNumber = 0;
     this.bytes = 0;
   }
@@ -723,7 +733,7 @@ class SseWriter {
     this.sequenceNumber += 1;
     const framed = `data: ${payload}`;
     this.bytes += Buffer.byteLength(framed);
-    if (!this.response.write(framed)) await once(this.response, 'drain');
+    if (!this.response.write(framed)) await once(this.response, 'drain', { signal: this.signal });
   }
 
   end() {
@@ -917,6 +927,10 @@ class StreamingResponseBuilder {
   }
 
   async complete() {
+    const stop = this.donePayload?.done_reason;
+    if (stop && !['stop', 'tool_calls', 'function_call'].includes(stop)) {
+      return this.incomplete(this.donePayload?.x_router?.stop_reason === 'context_length_exceeded' ? 'context_length_exceeded' : stop === 'length' ? 'max_output_tokens' : 'upstream_incomplete');
+    }
     await this.finishReasoning();
     const visibleText = this.textItem?.item.content[0].text || '';
     if (!visibleText.trim() && !this.toolItems.length) {
@@ -973,7 +987,12 @@ class StreamingResponseBuilder {
     await this.finishReasoning();
     const incomplete = this.shell('incomplete');
     incomplete.incomplete_details = { reason };
-    incomplete.usage = null;
+    incomplete.output = incomplete.output.map((item) => ({ ...item, status: 'incomplete' }));
+    for (const call of this.donePayload?.x_router?.partial_tool_calls ?? []) incomplete.output.push({
+      id: newId('fc'), type: 'function_call', status: 'incomplete', call_id: call.id, name: call.function.name, arguments: call.function.arguments
+    });
+    if (this.donePayload?.x_router) incomplete.x_router = this.donePayload.x_router;
+    incomplete.usage = usageFromOllama(this.donePayload, Boolean(this.reasoningItem));
     await this.writer.event('response.incomplete', { response: incomplete });
     return incomplete;
   }
@@ -1014,11 +1033,12 @@ async function readUpstreamError(upstreamResponse) {
 async function processNdjsonStream(upstreamResponse, builder) {
   const reader = upstreamResponse.body.getReader();
   let pending = '';
+  const decoder = new TextDecoder();
   let sawDone = false;
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
-    pending += Buffer.from(value).toString('utf8');
+    if (done) { pending += decoder.decode(); break; }
+    pending += decoder.decode(value, { stream: true });
     const lines = pending.split(/\r?\n/);
     pending = lines.pop() || '';
     for (const line of lines) {
@@ -1072,10 +1092,7 @@ function attachAbort(request, response, timeoutMs) {
   const controller = new AbortController();
   let timedOut = false;
   let clientAborted = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort(new DOMException('Ollama request timed out.', 'TimeoutError'));
-  }, timeoutMs);
+  // Generation has no total deadline. Transport detects connection failure and stalls.
   const onAborted = () => {
     clientAborted = true;
     controller.abort(new DOMException('Client disconnected.', 'AbortError'));
@@ -1085,12 +1102,12 @@ function attachAbort(request, response, timeoutMs) {
   };
   request.once('aborted', onAborted);
   response.once('close', onClose);
+  if (request.aborted || response.destroyed) onAborted();
   return {
     signal: controller.signal,
     timedOut: () => timedOut,
     clientAborted: () => clientAborted,
     cleanup() {
-      clearTimeout(timeout);
       request.off('aborted', onAborted);
       response.off('close', onClose);
     }
@@ -1151,6 +1168,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
   let builder = null;
   let backend = null;
   let lease = null;
+  let backendRequest = null;
+  let stopQueueHeartbeat = () => {};
 
   try {
     if (request.method !== 'POST') {
@@ -1166,7 +1185,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
     }
     toolPolicy = emptyToolPolicy(body, context.config.unsupportedToolsPolicy);
 
-    activeModelInfo = await readActiveModel(context.config);
+    abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
+    activeModelInfo = await selectModel(context.config, body?.model);
     if (context.state.maintenanceMode || context.requestGate.draining) {
       throw new ResponsesApiError(
         503,
@@ -1187,7 +1207,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       toolPolicy = await normalizeToolsForModel(
         body,
         activeModelInfo.model,
-        context.config.unsupportedToolsPolicy,
+        activeModelInfo.catalog_mode ? 'reject' : context.config.unsupportedToolsPolicy,
         capabilityLookup
       );
     } catch (error) {
@@ -1210,7 +1230,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
       context.config.forcedKeepAlive,
       defaultThink,
       context.config.responsesContextShift,
-      context.config.rewriteRequestedModelToActive,
+      activeModelInfo.catalog_mode ? activeModelInfo.aliases.includes(body?.model) : context.config.rewriteRequestedModelToActive,
       context.config.routerModelAlias
     );
     let thinkPolicy;
@@ -1250,16 +1270,21 @@ export async function handleResponsesRequest(request, response, pathname, contex
     translated.toolsDropped = toolPolicy.toolsDropped;
     translated.unsupportedToolsPolicy = toolPolicy.unsupportedToolsPolicy;
     translated.originalBody = translated.requestBody;
-    let backendRequest;
     try {
       // Template application/tokenization is part of an accepted generation
       // request. Hold the lease across it so draining cannot interrupt a
       // request between admission and backend inference.
-      lease = context.requestGate.acquire({
+      lease = await context.requestGate.acquire({
         endpoint: pathname,
         clientIdentity: request.headers['x-client-name'] || request.socket.remoteAddress,
-        limit: backend.maxActiveRequests
+        limit: backend.maxActiveRequests,
+        backendKey: backend.admissionKey,
+        model: activeModelInfo.model,
+        signal: abortState.signal,
+        onQueued: () => { stopQueueHeartbeat = queueHeartbeat(response, translated.stream ? 'responses' : null); }
       });
+      stopQueueHeartbeat();
+      await backend.ensureAvailable(abortState.signal);
       backendRequest = backend.prepareResponses(translated);
       translated.temperatureForwarding = backendRequest.temperatureForwarding ?? null;
       if (Object.hasOwn(backendRequest, 'forwardedTemperature')) {
@@ -1275,7 +1300,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
           outputLimitPolicy: backendRequest.reasoning.outputLimitPolicy
         });
       }
-      if (backend.validateResponsesContext) await backend.validateResponsesContext(backendRequest);
+      if (backend.validateResponsesContext) await backend.validateResponsesContext(backendRequest, abortState.signal);
     } catch (error) {
       if (error instanceof BackendAdapterError || error instanceof RequestGateError) {
         if (error instanceof BackendAdapterError) throw backendErrorToResponsesError(error);
@@ -1289,12 +1314,10 @@ export async function handleResponsesRequest(request, response, pathname, contex
       }
       throw error;
     }
-    abortState = attachAbort(request, response, context.config.upstreamTimeoutMs);
-
     const responseId = newId('resp');
     const createdAt = Math.floor(Date.now() / 1000);
     if (translated.stream) {
-      response.writeHead(200, {
+      if (!response.headersSent) response.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-store',
         connection: 'keep-alive',
@@ -1304,7 +1327,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
           ? { 'x-router-effective-max-output-tokens': String(backendRequest.reasoning.outputTokens) }
           : {})
       });
-      writer = new SseWriter(response);
+      writer = new SseWriter(response, abortState.signal);
       builder = new StreamingResponseBuilder(
         writer,
         translated.requestBody,
@@ -1320,15 +1343,10 @@ export async function handleResponsesRequest(request, response, pathname, contex
 
     let upstreamResponse;
     try {
-      upstreamResponse = await upstreamFetch(backend.upstreamConfig, backendRequest.path, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: translated.stream ? 'application/x-ndjson' : 'application/json'
-        },
-        body: JSON.stringify(backendRequest.body),
-        signal: abortState.signal
-      });
+      upstreamResponse = await fetchPrepared(backend, backendRequest, {
+        'content-type': 'application/json',
+        accept: translated.stream ? 'text/event-stream' : 'application/json'
+      }, abortState.signal);
     } catch (error) {
       if (abortState.clientAborted()) {
         return {
@@ -1434,6 +1452,8 @@ export async function handleResponsesRequest(request, response, pathname, contex
         upstreamError: false,
         usage: rawUsageFromOllama(builder.donePayload),
         responseBytes: writer.bytes,
+        incomplete: completed.status === 'incomplete',
+        incompleteReason: completed.incomplete_details?.reason,
         outputItems: completed.output.length
       };
     } catch (error) {
@@ -1471,7 +1491,7 @@ export async function handleResponsesRequest(request, response, pathname, contex
         ? error
         : (error instanceof BackendAdapterError
           ? backendErrorToResponsesError(error)
-          : (abortState.timedOut()
+          : (abortState.timedOut() || error?.name === 'TimeoutError'
             ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for the active backend.', null, 'server_error')
             : new ResponsesApiError(502, 'UPSTREAM_STREAM_FAILED', error.message, null, 'server_error')));
       await endFailedStream(builder, writer, apiError);
@@ -1490,14 +1510,21 @@ export async function handleResponsesRequest(request, response, pathname, contex
       };
     }
   } catch (error) {
+    if (abortState?.clientAborted() || response.destroyed) return {
+      ...outcomeBase(started, pathname, body, activeModelInfo?.model ?? null, translated, toolPolicy),
+      allowed: true, rejected: false, status: 499, responseStatus: 499,
+      upstreamError: false, errorCode: 'CLIENT_CLOSED_REQUEST', usage: null, responseBytes: writer?.bytes || 0
+    };
     const apiError = error instanceof ResponsesApiError
       ? error
       : (error instanceof BackendAdapterError
         ? backendErrorToResponsesError(error)
-        : (abortState?.timedOut()
+        : (abortState?.timedOut() || error?.name === 'TimeoutError'
           ? new ResponsesApiError(504, 'UPSTREAM_TIMEOUT', 'Timed out waiting for Ollama.', null, 'server_error')
           : new ResponsesApiError(500, 'INTERNAL_ERROR', error.message || 'Unexpected Responses adapter error.', null, 'server_error')));
-    if (!response.headersSent && !response.destroyed) sendJson(response, apiError.statusCode, responsesErrorPayload(apiError));
+    if (!response.headersSent && !response.destroyed) sendJson(response, apiError.statusCode, { ...responsesErrorPayload(apiError),
+      ...(backendRequest?.journal ? { x_router: { status: 'incomplete', record_id: backendRequest.journal.id }, partial_response: backendRequest.journal.partial } : {}) });
+    else endQueuedError(response, 'responses', { code: apiError.code, message: apiError.message, param: apiError.param });
     return {
       ...outcomeBase(started, pathname, body, activeModelInfo?.model ?? null, translated, toolPolicy),
       allowed: false,
@@ -1519,7 +1546,13 @@ export async function handleResponsesRequest(request, response, pathname, contex
       responseBytes: 0
     };
   } finally {
+    stopQueueHeartbeat();
     abortState?.cleanup();
     lease?.release();
+    if (backendRequest?.journal && !backendRequest.journal.closed) {
+      try { await backendRequest.journal.append({ type: 'terminal', status: 'incomplete', reason: 'delivery_interrupted' }); }
+      catch (error) { console.error('generation archive finalization failed', error); }
+      finally { await backendRequest.journal.close(); }
+    }
   }
 }

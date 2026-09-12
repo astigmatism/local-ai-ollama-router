@@ -1,5 +1,7 @@
 # Configuration
 
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
 All configuration is environment-variable driven. `.env.example` is the starting point for Docker Compose.
 
 ## Router API listener
@@ -40,10 +42,11 @@ The admin portal and its admin-port JSON APIs are intentionally unauthenticated.
 | Variable | Default | Purpose |
 |---|---:|---|
 | `OLLAMA_UPSTREAM_URL` | `http://ollama:11434` | Raw Ollama backend URL. |
-| `OLLAMA_UPSTREAM_TIMEOUT_MS` | `900000` | Native HTTP timeout while awaiting Ollama's response, including queue/model-load waits before response headers. |
+| `OLLAMA_UPSTREAM_TIMEOUT_MS` | `30000` | Timeout for metadata/control operations; not a generation lifetime. |
+| `GENERATION_STALL_TIMEOUT_MS` | `120000` | Inactivity watchdog; bytes and actual backend prefill/decode progress reset it. No total generation deadline. |
 | `RESPONSES_CONTEXT_SHIFT` | `false` | Controls Ollama `shift` only for `/v1/responses` and `/responses`; disabled by default so Codex requests fail instead of silently shifting old context. |
 
-The router uses Node's native HTTP transport for all Ollama calls, so `OLLAMA_UPSTREAM_TIMEOUT_MS` remains authoritative while Ollama is queued or loading a model before it sends response headers. JSON bodies are framed with an explicit byte `Content-Length` rather than `Transfer-Encoding: chunked`.
+The router uses Node's native HTTP transport. `OLLAMA_UPSTREAM_TIMEOUT_MS` bounds legacy Ollama calls and primary metadata/control operations. It does not limit the primary router's FIFO queue wait or total llama.cpp generation time; generation uses connection and inactivity checks. Client JSON read/header timeouts must cover waiting plus generation. Streaming queue waits receive keepalives. JSON request bodies use explicit byte `Content-Length`.
 
 ## Active model
 

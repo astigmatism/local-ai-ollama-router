@@ -1,5 +1,24 @@
 # Stable Active-Model Discovery
 
+Primary entries expose `x_ollama_router.display_name`: **Daytime (128K)** for `qwen3.8-27b-q8_0`, **Nighttime (32K)** for `qwen3.8-27b-abliterated-q6_k`. Clients use these labels for presentation while retaining canonical IDs in requests. The router dashboard and DSH discovery consume them; Open WebUI's alignment script persists them as model names.
+
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
+Primary `output_policy` is `unrestricted`; `default_output_tokens` and `max_output_tokens` are null, `server_default_output_tokens` is -1, and enabled effort budgets are -1. Null must never be replaced with a client fallback or context-capacity default.
+
+In **primary catalog mode**, `GET /v1/models` lists each canonical model exactly once, followed by a compatibility entry for `ROUTER_MODEL_ALIAS` (default `local-active`). This retains legacy clients that find the exact alias ID in `data`. `GET /v1/models/{id}` accepts canonical IDs and registered aliases. The compatibility entry equals its canonical target except for `id` and `x_ollama_router.alias: true`; context, concurrency, health, output policy, reasoning and capabilities are identical. Canonical entries retain `alias: false` and their `aliases` metadata. Other registered aliases remain available through metadata, detail lookup and inference.
+
+The compatibility entry represents the same backend and admission slot. It does not add capacity, switch policy, or fall back to a different resident when unavailable. Catalog mode accepts canonical IDs, registered aliases, and an omitted model (the default), independently of the legacy broad-rewrite setting; unknown IDs return 404. Legacy single-marker behavior remains as documented below.
+
+Pickers can omit `alias: true` entries when the corresponding `upstream_model` canonical entry exists; single-marker lists must retain their sole alias entry. Ollama `/api/tags` lists canonical entries; `/api/ps` lists healthy canonical residents; `/api/show` resolves a selected ID or alias. Admin overview and runtime state also remain canonical-only, so publishers and dashboards continue to count real residents. The list ETag covers the compatibility row as well as canonical metadata.
+
+This discovery repair does not restore retired 128K/2 or 256K/1 capacity, a 32768-token output ceiling, or a medium router default. See the [Harness companion change request](HARNESS_PORTAL_COMPATIBILITY.md) for consumers that must distinguish complete unrestricted metadata from missing limits.
+
+Public metadata remains schema v2, adding `health.available`, `health.status`, `aliases`, `artifact`, `revision`, `quantization`, `default_output_tokens`, `server_default_output_tokens`, and per-effort `reasoning_budget_tokens` (`-1` means no separate budget). Per-model metadata caches expire after the configured TTL (production: five seconds); reload invalidates both. Health does not change a model's qualified capabilities. No upstream URL, slot-control API, or admin token is exposed in public discovery.
+
+The atomic marker is schema v3 with a `models` array, `default_model`, and a legacy coding projection at the root. See [Primary integration](PRIMARY_INTEGRATION.md). The rest of this document describes the retained **legacy single-marker mode**.
+
+
 ## Public alias
 
 The router publishes one stable OpenAI-style model ID for its active slot. `ROUTER_MODEL_ALIAS` configures that ID and defaults to `local-active`. The alias is not an Ollama model copy, an installed-model catalog entry, or a model-management mechanism.

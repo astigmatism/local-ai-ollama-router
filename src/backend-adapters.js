@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { TextDecoder, TextEncoder } from 'node:util';
 import { upstreamFetch, upstreamJson } from './upstream.js';
+import { managedCompletion, openGenerationJournal, rebaseContext } from './generation-session.js';
 
 const encoder = new TextEncoder();
 const LLAMA_CPP_KIND = 'llama_cpp';
@@ -529,7 +530,7 @@ function messagesForLlama(messages, protocol, allowVision = false) {
 export function validatedReasoningPolicy(activeModel) {
   const policy = activeModel?.reasoning_policy;
   if (!isPlainObject(policy)) return null;
-  if (policy.schema_version !== undefined && policy.schema_version !== 1) {
+  if (policy.schema_version !== undefined && ![1, 2].includes(policy.schema_version)) {
     throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The active reasoning policy schema version is not supported.');
   }
   if (!isPlainObject(policy.levels) || Object.keys(policy.levels).length === 0) {
@@ -544,9 +545,11 @@ export function validatedReasoningPolicy(activeModel) {
     }
     if (!isPlainObject(entry)
       || typeof entry.enabled !== 'boolean'
-      || positiveInteger(entry.default_output_tokens) === null
-      || positiveInteger(entry.max_output_tokens) === null
-      || entry.default_output_tokens > entry.max_output_tokens) {
+      || (policy.schema_version === 2
+        ? entry.default_output_tokens !== null || entry.max_output_tokens !== null
+        : positiveInteger(entry.default_output_tokens) === null
+          || positiveInteger(entry.max_output_tokens) === null
+          || entry.default_output_tokens > entry.max_output_tokens)) {
       throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The active reasoning policy has an invalid ${level} level.`);
     }
     const normalizedEntry = {
@@ -600,7 +603,7 @@ export function validatedReasoningPolicy(activeModel) {
     throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', 'The reasoning answer reserve is invalid.');
   }
   for (const [level, entry] of Object.entries(levels)) {
-    if (positiveInteger(entry.reasoning_budget_tokens) !== null
+    if (entry.default_output_tokens !== null && positiveInteger(entry.reasoning_budget_tokens) !== null
       && entry.default_output_tokens < entry.reasoning_budget_tokens + answerReserve) {
       throw new BackendAdapterError(503, 'INVALID_REASONING_POLICY', `The ${level} default does not reserve enough visible-answer capacity.`);
     }
@@ -632,7 +635,7 @@ export function validatedReasoningPolicy(activeModel) {
   }
 
   return {
-    schema_version: 1,
+    schema_version: policy.schema_version ?? 1,
     default_level: defaultLevel,
     aliases,
     boolean_true_behavior: {
@@ -737,7 +740,7 @@ function requestedOutputLimit(body, protocol) {
     return maxCompletionTokens ?? maxTokens;
   }
   if (protocol === 'responses') return body?.max_output_tokens;
-  return body?.options?.num_predict ?? body?.num_predict;
+  return body?.options?.num_predict ?? body?.num_predict ?? body?.n_predict;
 }
 
 export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
@@ -754,22 +757,24 @@ export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
     max_output_tokens: positiveInteger(activeModel?.max_output_tokens, 4096)
   };
   const rawLimit = requestedOutputLimit(body, protocol);
-  const requestedOutputTokens = rawLimit === undefined || rawLimit === null
+  const unlimited = policy?.schema_version === 2;
+  const nativeUnlimited = protocol.startsWith('native') && rawLimit === -1;
+  const requestedOutputTokens = rawLimit === undefined || rawLimit === null || nativeUnlimited
     ? null
     : positiveInteger(rawLimit);
-  let outputTokens = requestedOutputTokens === null && rawLimit !== undefined && rawLimit !== null
+  let outputTokens = requestedOutputTokens === null && rawLimit !== undefined && rawLimit !== null && !nativeUnlimited
     ? null
     : (requestedOutputTokens ?? entry.default_output_tokens);
   const outputParam = protocol === 'responses' ? 'max_output_tokens' : (protocol.startsWith('native') ? 'options.num_predict' : 'max_tokens');
-  if (outputTokens === null) {
+  if (outputTokens === null && !(unlimited && (rawLimit == null || nativeUnlimited))) {
     throw new BackendAdapterError(400, 'INVALID_OUTPUT_LIMIT', 'The requested output limit must be a positive integer.', outputParam);
   }
-  const outputLimitCapped = outputTokens > entry.max_output_tokens && policy?.output_limit_policy === 'cap';
+  const outputLimitCapped = !unlimited && outputTokens > entry.max_output_tokens && policy?.output_limit_policy === 'cap';
   if (outputLimitCapped) outputTokens = entry.max_output_tokens;
-  if (outputTokens > entry.max_output_tokens) {
+  if (!unlimited && outputTokens > entry.max_output_tokens) {
     throw new BackendAdapterError(400, 'OUTPUT_LIMIT_EXCEEDED', `Reasoning level ${level} permits at most ${entry.max_output_tokens} total output tokens.`, outputParam);
   }
-  if (entry.enabled && entry.reasoning_budget_tokens !== -1) {
+  if (outputTokens !== null && entry.enabled && entry.reasoning_budget_tokens !== -1) {
     const required = entry.reasoning_budget_tokens + policy.answer_reserve;
     if (outputTokens < required) {
       throw new BackendAdapterError(400, 'REASONING_OUTPUT_BUDGET_TOO_SMALL', `Reasoning level ${level} requires at least ${required} total output tokens (${entry.reasoning_budget_tokens} reasoning plus ${policy.answer_reserve} answer reserve).`, outputParam);
@@ -777,6 +782,11 @@ export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
   }
 
   const cleanBody = { ...(body || {}) };
+  const requestedThinkingBudget = body?.reasoning_budget_tokens ?? body?.options?.reasoning_budget_tokens;
+  if (requestedThinkingBudget !== undefined && (!Number.isSafeInteger(requestedThinkingBudget) || requestedThinkingBudget < -1)) {
+    throw new BackendAdapterError(400, 'INVALID_REASONING_BUDGET', 'reasoning_budget_tokens must be -1 (unrestricted) or a nonnegative integer.', 'reasoning_budget_tokens');
+  }
+  if (unlimited) delete cleanBody.reasoning_budget_tokens;
   delete cleanBody.reasoning_effort;
   delete cleanBody.reasoning;
   delete cleanBody.think;
@@ -792,11 +802,12 @@ export function normalizeLlamaReasoningRequest(body, activeModel, protocol) {
   const controls = entry.enabled
     ? {
       chat_template_kwargs: { enable_thinking: true },
-      reasoning_effort: entry.template_effort,
+      ...(entry.template_effort === 'default' ? {} : { reasoning_effort: entry.template_effort }),
       ...(policy?.reasoning_format ? { reasoning_format: policy.reasoning_format } : {}),
-      ...(positiveInteger(entry.reasoning_budget_tokens) === null ? {} : { reasoning_budget_tokens: entry.reasoning_budget_tokens })
+      ...((entry.reasoning_budget_tokens === undefined || (entry.reasoning_budget_tokens === -1 && !unlimited)) ? {} : { reasoning_budget_tokens: entry.reasoning_budget_tokens })
     }
     : { chat_template_kwargs: { enable_thinking: false } };
+  if (unlimited && requestedThinkingBudget !== undefined) controls.reasoning_budget_tokens = requestedThinkingBudget;
 
   return {
     level,
@@ -852,6 +863,13 @@ function completionUsage(payload) {
     prompt_eval_duration: null,
     eval_duration: null
   };
+}
+
+function structuredOutputControls(body) {
+  if (body?.response_format) return { response_format: body.response_format };
+  if (body?.format === 'json') return { response_format: { type: 'json_object' } };
+  if (isPlainObject(body?.format)) return { response_format: { type: 'json_schema', json_schema: { name: 'response', schema: body.format, strict: true } } };
+  return {};
 }
 
 function invalidJsonLiteralOffset(value) {
@@ -973,13 +991,17 @@ export function openAiCompletionToOllama(payload, { kind, model }) {
   const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
   const content = choice?.message?.content ?? choice?.text ?? '';
   const thinking = typeof choice?.message?.reasoning_content === 'string' ? choice.message.reasoning_content : '';
-  const toolCalls = openAiToolCallsToOllama(choice?.message?.tool_calls);
+  const incomplete = choice?.finish_reason && !['stop', 'tool_calls', 'function_call'].includes(choice.finish_reason);
+  const toolCalls = incomplete ? [] : openAiToolCallsToOllama(choice?.message?.tool_calls);
   const usage = completionUsage(payload);
   const common = {
     model,
     created_at: new Date().toISOString(),
     done: true,
-    done_reason: choice?.finish_reason || 'stop',
+    done_reason: choice?.finish_reason || 'incomplete',
+    ...((payload?.x_router || (incomplete && choice?.message?.tool_calls)) ? { x_router: {
+      ...payload.x_router, ...(incomplete && choice?.message?.tool_calls ? { partial_tool_calls: choice.message.tool_calls } : {})
+    } } : {}),
     prompt_eval_count: usage.prompt_eval_count,
     eval_count: usage.eval_count,
     ...(payload?.timings ? { timings: payload.timings } : {})
@@ -1021,6 +1043,7 @@ export function openAiSseToOllamaStream(readable, {
   let buffer = '';
   let doneSent = false;
   let lastTimings = null;
+  let routerMetadata = null;
   let toolsSent = false;
   const pendingToolCalls = new Map();
   const termination = {
@@ -1124,6 +1147,11 @@ export function openAiSseToOllamaStream(readable, {
     const diagnosticsByIndex = new Map(
       [...pendingToolCalls.values()].map((pending) => [pending.index, toolDiagnostics(pending)])
     );
+    if (routerMetadata && !['stop', 'tool_calls', 'function_call'].includes(termination.finishReason)) {
+      routerMetadata = { ...routerMetadata, partial_tool_calls: calls };
+      toolsSent = true;
+      return;
+    }
     const toolCalls = openAiToolCallsToOllama(calls, diagnosticsByIndex);
     controller.enqueue(encoder.encode(`${JSON.stringify({
       model,
@@ -1138,6 +1166,7 @@ export function openAiSseToOllamaStream(readable, {
     if (doneSent) return;
     // With include_usage, llama.cpp reports counts in a choices:[] trailer
     // after the finish_reason chunk, so [DONE] is the safe finalization point.
+    if (!termination.finishReason) throw new BackendAdapterError(502, 'INCOMPLETE_UPSTREAM_STREAM', 'The backend terminal event has no finish reason.');
     emitPendingTools(controller);
     const usage = usageState.usage;
     const finalPayload = {
@@ -1145,7 +1174,8 @@ export function openAiSseToOllamaStream(readable, {
       created_at: new Date().toISOString(),
       ...(kind === 'native-generate' ? { response: '' } : { message: { role: 'assistant', content: '' } }),
       done: true,
-      done_reason: termination.finishReason || 'stop',
+      done_reason: termination.finishReason,
+      ...(routerMetadata ? { x_router: routerMetadata } : {}),
       prompt_eval_count: positiveInteger(usage?.prompt_tokens, 0),
       eval_count: positiveInteger(usage?.completion_tokens, 0),
       ...(lastTimings ? { timings: lastTimings } : {})
@@ -1167,6 +1197,7 @@ export function openAiSseToOllamaStream(readable, {
     } catch {
       throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_STREAM', 'llama.cpp returned malformed SSE JSON.');
     }
+    if (payload.x_router) routerMetadata = payload.x_router;
     if (payload.usage) usageState.usage = payload.usage;
     if (payload.timings) lastTimings = payload.timings;
     const choice = Array.isArray(payload.choices) ? payload.choices[0] : null;
@@ -1213,12 +1244,18 @@ export function openAiSseToOllamaStream(readable, {
   }));
 }
 
-export function normalizeOpenAiSseModel(readable, model) {
+export function normalizeOpenAiSseModel(readable, model, onPayload = null) {
   const decoder = new TextDecoder();
   let buffer = '';
+  let terminal = false;
+  let finishReason = null;
   const emit = (frame, controller) => {
     const data = dataLines(frame);
     if (!data || data === '[DONE]') {
+      if (data === '[DONE]') {
+        if (!finishReason) throw new BackendAdapterError(502, 'INCOMPLETE_UPSTREAM_STREAM', 'Terminal event has no finish reason.');
+        terminal = true;
+      }
       controller.enqueue(encoder.encode(`${frame}\n\n`));
       return;
     }
@@ -1228,7 +1265,9 @@ export function normalizeOpenAiSseModel(readable, model) {
     } catch {
       throw new BackendAdapterError(502, 'MALFORMED_UPSTREAM_STREAM', 'llama.cpp returned malformed SSE JSON.');
     }
+    if (payload.choices?.[0]?.finish_reason) finishReason = payload.choices[0].finish_reason;
     payload.model = model;
+    onPayload?.(payload);
     controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
   };
   return readable.pipeThrough(new TransformStream({
@@ -1242,6 +1281,7 @@ export function normalizeOpenAiSseModel(readable, model) {
       buffer += decoder.decode();
       const parsed = sseFrames(buffer, true);
       for (const frame of parsed.frames) emit(frame, controller);
+      if (!terminal) throw new BackendAdapterError(502, 'INCOMPLETE_UPSTREAM_STREAM', 'Backend ended without a terminal event.');
     }
   }));
 }
@@ -1262,6 +1302,35 @@ class BackendAdapter {
 
   get maxActiveRequests() {
     return null;
+  }
+
+  get admissionKey() {
+    return `${this.kind}:${this.upstreamConfig.upstreamUrl}`;
+  }
+
+  async ensureAvailable(signal) {
+    signal?.throwIfAborted();
+    if (!this.activeModel.catalog_mode) return;
+    let health;
+    try {
+      health = await upstreamJson(this.upstreamConfig, '/health', { timeoutMs: 3000, signal, maxResponseBytes: 16384 });
+    } catch {
+      signal?.throwIfAborted();
+    }
+    if (!health?.ok || health.body?.status !== 'ok') {
+      throw new BackendAdapterError(503, 'BACKEND_UNAVAILABLE', `The backend for ${this.activeModel.model} is unavailable. Retry when this service is healthy.`, 'model');
+    }
+    if (this.activeModel.output_policy === 'unrestricted') {
+      const launch = this.activeModel.raw?.runtime_output_policy;
+      if (launch?.verification !== 'docker-inspect-argv' || launch.n_predict !== -1
+        || launch.reasoning_budget !== -1 || launch.reasoning_effort !== 'default' || !launch.container_id) {
+        throw new BackendAdapterError(503, 'BACKEND_LAUNCH_NOT_VERIFIED', 'Publish the catalog after verifying actual running --n-predict -1 --reasoning-budget -1 --reasoning-effort default arguments. This pinned engine reports -1 in /props even under a capped launch.', 'model');
+      }
+      const props = await upstreamJson(this.upstreamConfig, '/props', { timeoutMs: 5000, signal });
+      if (props.body?.default_generation_settings?.params?.n_predict !== -1) {
+        throw new BackendAdapterError(503, 'BACKEND_OUTPUT_POLICY_MISMATCH', 'The running backend must launch with --n-predict -1. In this pinned engine request -1 inherits the launch default.', 'model');
+      }
+    }
   }
 
   async health() {
@@ -1386,19 +1455,28 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
           ...(this.activeModel.capability_profile?.tools === true ? ['tools'] : []),
           ...(this.activeModel.capability_profile?.vision === true ? ['vision'] : [])
         ],
-        details: { backend: 'llama_cpp' },
-        model_info: { context_length: this.activeModel.context_length }
+        details: { backend: 'llama_cpp', format: 'gguf', family: 'qwen3', parameter_size: '27B', quantization_level: this.activeModel.raw?.quantization },
+        model_info: { context_length: this.activeModel.context_length },
+        ...(this.activeModel.catalog_mode ? { x_ollama_router: {
+          display_name: this.activeModel.raw?.display_name ?? this.activeModel.model,
+          upstream_model: this.activeModel.model, aliases: this.activeModel.aliases,
+          context_window: this.activeModel.context_length, context_safety_reserve: enforcedContextSafetyReserve(this.activeModel),
+          active_request_limit: this.maxActiveRequests, max_output_tokens: this.activeModel.max_output_tokens,
+          default_output_tokens: this.activeModel.default_output_tokens,
+          input_modalities: this.activeModel.input_modalities, artifact: this.activeModel.raw.artifact
+        } } : {})
       },
       text: ''
     };
   }
 
-  async validateContext(messages, outputTokens, templateControls = {}) {
+  async validateContext(messages, outputTokens, templateControls = {}, signal) {
     const slotContext = positiveInteger(this.activeModel.context_length, 131072);
     const reserve = enforcedContextSafetyReserve(this.activeModel);
     let applied;
     try {
       applied = await upstreamJson(this.upstreamConfig, '/apply-template', {
+        signal,
         method: 'POST',
         body: {
           messages,
@@ -1409,7 +1487,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
         timeoutMs: Math.min(this.config.upstreamTimeoutMs, 120000)
       });
     } catch (error) {
-      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The active backend could not apply its chat template: ${error.message}`);
+      signal?.throwIfAborted();
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The backend for ${this.activeModel.model} could not apply its chat template: ${error.message}`);
     }
     const prompt = applied.body?.prompt;
     if (!applied.ok || typeof prompt !== 'string') {
@@ -1418,29 +1497,67 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     let tokenized;
     try {
       tokenized = await upstreamJson(this.upstreamConfig, '/tokenize', {
+        signal,
         method: 'POST',
         body: { content: prompt, add_special: false },
         timeoutMs: Math.min(this.config.upstreamTimeoutMs, 300000)
       });
     } catch (error) {
-      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The active backend could not tokenize the formatted prompt: ${error.message}`);
+      signal?.throwIfAborted();
+      throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', `The backend for ${this.activeModel.model} could not tokenize the formatted prompt: ${error.message}`);
     }
-    const inputTokens = Array.isArray(tokenized.body?.tokens) ? tokenized.body.tokens.length : null;
+    let inputTokens = Array.isArray(tokenized.body?.tokens) ? tokenized.body.tokens.length : null;
     if (!tokenized.ok || inputTokens === null) {
       throw new BackendAdapterError(503, 'TOKENIZER_UNAVAILABLE', 'The active backend did not return a valid token array.');
     }
-    if (inputTokens + outputTokens + reserve > slotContext) {
+    if (hasMultimodalContent(messages) && this.activeModel.catalog_mode) {
+      // Text tokenization omits projector patch tokens. A zero-generation prefill
+      // uses the actual selected template/projector under this request's lease.
+      const counted = await upstreamFetch(this.upstreamConfig, '/v1/chat/completions', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, signal,
+        generation: true, progressPath: '/slots',
+        body: JSON.stringify({ model: this.activeModel.model, messages, ...templateControls, n_predict: 0, stream: false })
+      });
+      const payload = await counted.json();
+      if (!counted.ok || !Number.isSafeInteger(payload?.usage?.prompt_tokens)) {
+        throw new BackendAdapterError(counted.status === 400 ? 400 : 503,
+          counted.status === 400 ? OPENAI_CONTEXT_LENGTH_EXCEEDED_CODE : 'TOKENIZER_UNAVAILABLE',
+          payload.error?.message || 'The backend could not count the actual multimodal prompt.', 'messages');
+      }
+      inputTokens = payload.usage.prompt_tokens;
+    }
+    if (inputTokens + (outputTokens ?? 1) + reserve > slotContext) {
       throw new BackendAdapterError(
         400,
         OPENAI_CONTEXT_LENGTH_EXCEEDED_CODE,
-        `Formatted input (${inputTokens}) plus requested output (${outputTokens}) and safety reserve (${reserve}) exceeds the ${slotContext}-token slot.`,
+        `Formatted input (${inputTokens}) plus ${outputTokens === null ? 'minimum generation space (1; unrestricted output)' : `requested output (${outputTokens})`} and safety reserve (${reserve}) exceeds the ${slotContext}-token slot${this.activeModel.catalog_mode ? ` for ${this.activeModel.model}` : ''}.`,
         'messages'
       );
     }
-    return { inputTokens, outputTokens, reserve, slotContext };
+    return { inputTokens, outputTokens, outputPolicy: outputTokens === null ? 'unrestricted' : 'explicit', availableTokens: slotContext - inputTokens - reserve, reserve, slotContext };
   }
 
-  async prepareProxy({ method, pathname, body }) {
+  async prepareWorkingContext(messages, outputTokens, controls, original, signal) {
+    if (!this.activeModel.catalog_mode) return { messages, context: await this.validateContext(messages, outputTokens, controls, signal) };
+    const journal = await openGenerationJournal(this.config, original);
+    try {
+      try {
+        const context = await this.validateContext(messages, outputTokens, controls, signal);
+        await journal.append({ type: 'admission', ...context });
+        return { messages, journal, context };
+      } catch (error) {
+        if (error.code !== OPENAI_CONTEXT_LENGTH_EXCEEDED_CODE || outputTokens !== null) throw error;
+        const transition = await rebaseContext(this, messages, controls, signal);
+        return { ...transition, journal, transition };
+      }
+    } catch (error) {
+      await journal.append({ type: 'terminal', status: 'incomplete', error: { code: error.code, message: error.message } });
+      await journal.close();
+      throw error;
+    }
+  }
+
+  async prepareProxy({ method, pathname, body, signal }) {
     if (['/api/embed', '/api/embeddings'].includes(pathname)) {
       throw new BackendAdapterError(400, 'UNSUPPORTED_PROFILE_CAPABILITY', 'Embeddings are not enabled for the active model profile.');
     }
@@ -1479,17 +1596,19 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       this.activeModel.capability_profile?.vision === true && protocol !== 'native-generate'
     );
     const templateControls = { ...reasoning.controls, ...toolRequest.templateControls };
-    const context = await this.validateContext(mappedMessages, outputTokens, templateControls);
+    const working = await this.prepareWorkingContext(mappedMessages, outputTokens, templateControls, body, signal);
+    const context = working.context;
     const temperature = llamaTemperature(body);
     const upstreamBody = {
       model: this.activeModel.model,
-      messages: mappedMessages,
+      messages: working.messages,
       stream: body?.stream !== false,
       ...(body?.stream === false ? {} : { stream_options: { include_usage: true } }),
       ...temperature.controls,
-      max_tokens: outputTokens,
+      ...(outputTokens === null ? { n_predict: -1 } : { max_tokens: outputTokens }),
       ...reasoning.controls,
       ...toolRequest.controls,
+      ...structuredOutputControls(body),
       ...(body?.seed === undefined ? {} : { seed: body.seed }),
       ...(body?.stop === undefined ? {} : { stop: body.stop }),
       ...(body?.top_p === undefined && body?.options?.top_p === undefined ? {} : { top_p: body?.top_p ?? body?.options?.top_p })
@@ -1501,6 +1620,8 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       streaming: upstreamBody.stream,
       method: 'POST',
       context,
+      journal: working.journal,
+      transition: working.transition,
       reasoning,
       templateControls,
       temperatureForwarding: temperature.forwarding,
@@ -1543,13 +1664,15 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
       stream: translated.stream,
       ...(translated.stream ? { stream_options: { include_usage: true } } : {}),
       ...temperature.controls,
-      max_tokens: outputTokens,
+      ...(outputTokens === null ? { n_predict: -1 } : { max_tokens: outputTokens }),
       ...reasoning.controls,
       ...toolRequest.controls
+      , ...structuredOutputControls(translated.upstreamBody)
     };
     return {
       path: '/v1/chat/completions',
       body,
+      originalRequest: translated.originalBody,
       responseKind: 'openai',
       outputTokens,
       reasoning,
@@ -1561,8 +1684,13 @@ export class LlamaCppBackendAdapter extends BackendAdapter {
     };
   }
 
-  async validateResponsesContext(prepared) {
-    return await this.validateContext(prepared.body.messages, prepared.outputTokens, prepared.templateControls);
+  async validateResponsesContext(prepared, signal) {
+    const working = await this.prepareWorkingContext(prepared.body.messages, prepared.outputTokens, prepared.templateControls, prepared.originalRequest ?? prepared.body, signal);
+    prepared.body.messages = working.messages;
+    prepared.journal = working.journal;
+    prepared.transition = working.transition;
+    prepared.context = working.context;
+    return working.context;
   }
 
   async adaptResponsesResponse(response, streaming, prepared = null) {
@@ -1607,6 +1735,9 @@ export function openAiNonstreamForPublic(payload, model) {
 }
 
 export async function fetchPrepared(adapter, prepared, headers = {}, signal = undefined) {
+  if (adapter.activeModel.catalog_mode && isGenerationPath(prepared.upstreamPath || prepared.path)) {
+    return managedCompletion(adapter, prepared, headers, signal);
+  }
   const method = prepared.method || 'POST';
   const payload = prepared.upstreamBody ?? prepared.body;
   return await upstreamFetch(adapter.upstreamConfig, prepared.upstreamPath || prepared.path, {
@@ -1615,6 +1746,8 @@ export async function fetchPrepared(adapter, prepared, headers = {}, signal = un
     body: ['GET', 'HEAD'].includes(String(method).toUpperCase()) || payload === undefined || payload === null
       ? undefined
       : JSON.stringify(payload),
-    signal
+    signal,
+    generation: isGenerationPath(prepared.upstreamPath || prepared.path),
+    progressPath: adapter.kind === 'llama_cpp' ? '/slots' : undefined
   });
 }

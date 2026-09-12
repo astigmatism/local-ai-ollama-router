@@ -1,5 +1,9 @@
 # Security Notes
 
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
+Primary generation archives always retain full request/output content, including reasoning and image data, separately from `PROMPT_LOGGING` metadata logs. They require protected persistent storage; retrieval always requires administrator authentication. See the primary storage policy before operating this profile.
+
 ## Network boundary
 
 This router is intended for a trusted local network. The human admin portal is intentionally unauthenticated and listens on a separate port, defaulting to `11435`. Anyone who can reach that port can view runtime state and trigger admin actions such as prewarm, test chat, active-marker reload, and maintenance-mode toggle.

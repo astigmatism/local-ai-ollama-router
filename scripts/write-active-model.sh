@@ -17,6 +17,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const [target, model, profile, defaultThink, capabilitiesFile] = process.argv.slice(2);
+let existing = null;
+if (fs.existsSync(target)) {
+  try { existing = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+}
+if (existing?.models) {
+  throw new Error('Resident catalog replacement refused; publish the complete primary catalog.');
+}
 let reasoningCapabilities = {};
 if (capabilitiesFile) {
   const parsed = JSON.parse(fs.readFileSync(capabilitiesFile, 'utf8'));

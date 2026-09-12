@@ -96,6 +96,6 @@ test('passthrough remains the default-compatible behavior while reject is explic
 
   await assert.rejects(
     normalizeToolsForModel(body, 'active:model', 'reject', capabilityLookup(['completion'])),
-    (error) => error.code === 'UNSUPPORTED_TOOLS' && /UNSUPPORTED_TOOLS_POLICY=drop/.test(error.message)
+    (error) => error.code === 'UNSUPPORTED_TOOLS' && /model qualified for tools/.test(error.message)
   );
 });

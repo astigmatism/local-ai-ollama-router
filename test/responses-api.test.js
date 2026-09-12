@@ -117,7 +117,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
             content: '',
             tool_calls: [{ id: 'call_weather_thinking', function: { name: 'get_weather', arguments: { city: 'Portland' } } }]
           },
-          done: true,
+          done: true, done_reason: 'stop',
           prompt_eval_count: 14,
           eval_count: 9
         });
@@ -131,7 +131,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
             thinking: 'I reached no visible answer.',
             content: ''
           },
-          done: true,
+          done: true, done_reason: 'stop',
           prompt_eval_count: 17,
           eval_count: 6
         });
@@ -145,7 +145,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
             content: '',
             tool_calls: [{ id: 'call_weather_1', function: { name: 'get_weather', arguments: { city: 'Portland' } } }]
           },
-          done: true,
+          done: true, done_reason: 'stop',
           prompt_eval_count: 12,
           eval_count: 7,
           eval_duration: 1_000_000_000
@@ -160,7 +160,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
             content: '',
             tool_calls: [{ id: 'call_bad', function: { name: 'bad', arguments: '{not-json' } }]
           },
-          done: true
+          done: true, done_reason: 'stop'
         });
         return;
       }
@@ -171,7 +171,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
           ...(body.think === true ? { thinking: 'reasoning from ollama' } : {}),
           content: 'hello from ollama'
         },
-        done: true,
+        done: true, done_reason: 'stop',
         prompt_eval_count: 3,
         eval_count: 4,
         total_duration: 2_000_000_000,
@@ -199,7 +199,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
         },
         done: false
       })}\n`);
-      response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, prompt_eval_count: 5, eval_count: 2 })}\n`);
+      response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop', prompt_eval_count: 5, eval_count: 2 })}\n`);
       return;
     }
     if (prompt === 'stream-thinking-tool') {
@@ -225,7 +225,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       response.end(`${JSON.stringify({
         model: body.model,
         message: { role: 'assistant', content: '' },
-        done: true,
+        done: true, done_reason: 'stop',
         prompt_eval_count: 6,
         eval_count: 5
       })}\n`);
@@ -240,7 +240,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       response.end(`${JSON.stringify({
         model: body.model,
         message: { role: 'assistant', content: '' },
-        done: true,
+        done: true, done_reason: 'stop',
         prompt_eval_count: 18,
         eval_count: 5
       })}\n`);
@@ -250,7 +250,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
       response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: false })}\n`);
       response.once('close', () => { state.upstreamClosed = true; });
       setTimeout(() => {
-        if (!response.destroyed) response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'late' }, done: true })}\n`);
+        if (!response.destroyed) response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'late' }, done: true, done_reason: 'stop' })}\n`);
       }, 500);
       return;
     }
@@ -259,7 +259,7 @@ function createFakeOllama({ capabilities = ['completion'], enforceThinkValues = 
     }
     response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'hello ' }, done: false })}\n`);
     response.write(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: 'stream' }, done: false })}\n`);
-    response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, prompt_eval_count: 8, eval_count: 3 })}\n`);
+    response.end(`${JSON.stringify({ model: body.model, message: { role: 'assistant', content: '' }, done: true, done_reason: 'stop', prompt_eval_count: 8, eval_count: 3 })}\n`);
   });
   return { server, requests, state };
 }
@@ -811,7 +811,7 @@ test('Codex namespace function groups flatten for Ollama and restore namespace o
   assert.equal(translated.upstreamBody.tools[0].function.name, 'functions__exec_command');
   assert.match(translated.upstreamBody.tools[0].function.description, /Namespace: functions/);
 
-  const response = translateOllamaResponse({
+  const response = translateOllamaResponse({ done: true, done_reason: 'stop',
     message: {
       role: 'assistant',
       content: '',
@@ -834,6 +834,7 @@ test('Codex namespace function groups flatten for Ollama and restore namespace o
 
 test('non-stream response translation emits text, function calls, stable IDs, and usage', () => {
   const translated = translateOllamaResponse({
+    done: true, done_reason: 'stop',
     message: {
       role: 'assistant',
       content: 'preface',
@@ -864,6 +865,7 @@ test('non-stream response translation emits text, function calls, stable IDs, an
 
 test('non-stream response emits raw thinking before assistant text and tool calls with aggregate usage', () => {
   const translated = translateOllamaResponse({
+    done: true, done_reason: 'stop',
     message: {
       role: 'assistant',
       thinking: 'careful raw reasoning',
@@ -1757,7 +1759,7 @@ test('thinking-only Responses completions fail without fabricating assistant mes
     ), false);
 
     assert.throws(
-      () => translateOllamaResponse({ message: { role: 'assistant', content: '   ' } }, { input: 'x' }, 'active:model'),
+      () => translateOllamaResponse({ done: true, done_reason: 'stop', message: { role: 'assistant', content: '   ' } }, { input: 'x' }, 'active:model'),
       (error) => error instanceof ResponsesApiError && error.code === 'EMPTY_UPSTREAM_RESPONSE'
     );
   } finally {
@@ -1809,7 +1811,7 @@ test('the /responses alias works and request history records fixed-model forward
 });
 
 test('a streamed upstream timeout fails coherently and client cancellation closes the Ollama request', async () => {
-  const timeoutFixture = await makeFixture({ configOverrides: { upstreamTimeoutMs: 30 } });
+  const timeoutFixture = await makeFixture({ configOverrides: { generationStallTimeoutMs: 30 } });
   try {
     const timeoutResponse = await postResponses(timeoutFixture, { input: 'slow', stream: true });
     assert.equal(timeoutResponse.status, 200);

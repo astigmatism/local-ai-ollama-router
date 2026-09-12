@@ -132,7 +132,7 @@ export async function normalizeToolsForModel(body, model, unsupportedToolsPolicy
   if (unsupportedToolsPolicy === 'reject') {
     throw new UnsupportedToolsError(
       'UNSUPPORTED_TOOLS',
-      `The active model ${JSON.stringify(model)} does not support tools. Use a tool-capable active model or set UNSUPPORTED_TOOLS_POLICY=drop to continue ordinary chat without native tools.`,
+      `The active model ${JSON.stringify(model)} does not support tools. Use a model qualified for tools or remove the tool definitions.`,
       inspected.toolsPresent ? 'tools' : null
     );
   }

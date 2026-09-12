@@ -1,5 +1,7 @@
 # Integration Notes
 
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
 ## OpenWebUI
 
 Current known setting:

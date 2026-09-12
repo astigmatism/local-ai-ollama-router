@@ -3,8 +3,12 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { loadConfig, publicConfig } from './config.js';
 import { readActiveModel } from './active-model.js';
+import { selectModel } from './model-catalog.js';
 import { JsonlStore } from './fs-store.js';
 import { Metrics } from './metrics.js';
 import { evaluateProxyPolicy, isLikelyStreamingRequest, MODEL_BODY_ROUTES, routeKey } from './policy.js';
@@ -33,8 +37,9 @@ import {
   resolveBackendAdapter
 } from './backend-adapters.js';
 import { RequestGate, RequestGateError } from './request-gate.js';
+import { queueHeartbeat, endQueuedError, connectionAbort } from './queue-response.js';
 import {
-  ActiveModelDiscovery,
+  ModelCatalogDiscovery,
   ifNoneMatchMatches,
   ModelDiscoveryError,
   modelDiscoveryErrorPayload
@@ -183,27 +188,14 @@ async function handleModelDiscovery(request, response, pathname, context) {
         'invalid_request_error'
       );
     }
-    if (requestedId !== null && requestedId !== context.config.routerModelAlias) {
-      throw new ModelDiscoveryError(
-        404,
-        'MODEL_NOT_FOUND',
-        `Model ${JSON.stringify(requestedId)} was not found.`,
-        'model',
-        'invalid_request_error'
-      );
-    }
-
-    const discovery = await context.modelDiscovery.get();
-    const metadata = discovery.entry.x_ollama_router;
-    if (metadata.warnings.length) {
-      await recordDiscoveryFailure(
-        context,
-        'MODEL_METADATA_PARTIAL',
-        metadata.warnings,
-        metadata.upstream_model
-      );
-    } else {
-      context.state.lastDiscoveryFailureSignature = null;
+    const discovery = await context.modelDiscovery.document(requestedId);
+    for (const entry of discovery.entries) {
+      const metadata = entry.x_ollama_router;
+      if (metadata.warnings.length) {
+        await recordDiscoveryFailure(context, 'MODEL_METADATA_PARTIAL', metadata.warnings, metadata.upstream_model);
+      } else {
+        context.state.lastDiscoveryFailureSignature = null;
+      }
     }
 
     const headers = {
@@ -219,7 +211,7 @@ async function handleModelDiscovery(request, response, pathname, context) {
     sendJson(
       response,
       200,
-      requestedId === null ? { object: 'list', data: [discovery.entry] } : discovery.entry,
+      requestedId === null ? { object: 'list', data: discovery.entries } : discovery.entries[0],
       headers
     );
   } catch (error) {
@@ -274,6 +266,7 @@ async function buildSummary(context) {
     },
     config: publicConfig(context.config),
     activeModel,
+    models: (await context.modelDiscovery.document(null, { includeCompatibilityAlias: false })).entries,
     upstream,
     ollamaPs: ps,
     activeLoadedState,
@@ -288,12 +281,27 @@ async function buildSummary(context) {
 async function handleAdminApi(request, response, pathname, context, { requireAuth = true } = {}) {
   if (requireAuth && !requireAdmin(request, response, context.config)) return;
 
-  if (['/admin/api/runtime-state', '/admin/api/runtime-drain'].includes(pathname)) {
+  if (['/admin/api/runtime-state', '/admin/api/runtime-drain', '/admin/api/generation-record'].includes(pathname)) {
     if (!context.config.adminToken) {
       sendJson(response, 503, errorPayload('RUNTIME_CONTROL_UNAVAILABLE', 'Runtime control requires a configured admin token.'));
       return;
     }
     if (!requireAdmin(request, response, context.config)) return;
+  }
+
+  if (request.method === 'GET' && pathname === '/admin/api/generation-record') {
+    const id = new URL(request.url, 'http://router.local').searchParams.get('id');
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id ?? '')) {
+      sendJson(response, 400, errorPayload('INVALID_RECORD_ID', 'A generation record UUID is required.')); return;
+    }
+    const file = path.join(context.config.dataDir, 'generations', `${id}.jsonl`);
+    try { await stat(file); } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      sendJson(response, 404, errorPayload('RECORD_NOT_FOUND', 'Generation record not found.')); return;
+    }
+    response.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
+    await pipeline(createReadStream(file), response);
+    return;
   }
 
   if (request.method === 'GET' && pathname === '/admin/api/runtime-state') {
@@ -305,6 +313,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
       ok: true,
       runtime: context.requestGate.snapshot(activeModel),
       backend: { kind: backend.kind, health, status: ps },
+      models: (await context.modelDiscovery.document(null, { includeCompatibilityAlias: false })).entries,
       active_model: {
         profile: activeModel.profile,
         model: activeModel.model,
@@ -403,13 +412,19 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
   }
 
   if (request.method === 'POST' && pathname === '/admin/api/prewarm') {
-    const activeModel = await readActiveModel(context.config);
+    const body = parseJsonBuffer(await readRequestBody(request, context.config.maxBodyBytes));
+    const activeModel = await selectModel(context.config, body?.model);
     if (!activeModel.model) {
       sendJson(response, 503, errorPayload('NO_ACTIVE_MODEL', 'Cannot prewarm because no active model marker is available.'));
       return;
     }
     const backend = resolveBackendAdapter(context.config, activeModel);
     if (backend.kind === 'llama_cpp') {
+      if (context.state.maintenanceMode) throw new RequestGateError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.');
+      const adminAbort = connectionAbort(request, response);
+      let adminLease;
+      try {
+      adminLease = await context.requestGate.acquire({ endpoint: pathname, clientIdentity: 'admin', limit: backend.maxActiveRequests, backendKey: backend.admissionKey, model: activeModel.model, signal: adminAbort.signal });
       const started = Date.now();
       if (Buffer.byteLength(activeModel.model, 'utf8') > LLAMA_PREWARM_MAX_MODEL_BYTES) {
         await persistEvent(context.store, {
@@ -523,8 +538,9 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
         ));
       }
       return;
+      } finally { adminAbort.cleanup(); adminLease?.release(); }
     }
-    const body = {
+    const warmBody = {
       model: activeModel.model,
       prompt: '',
       stream: false,
@@ -532,7 +548,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
     };
     const started = Date.now();
     try {
-      const result = await upstreamJson(backend.upstreamConfig, '/api/generate', { method: 'POST', body, timeoutMs: context.config.upstreamTimeoutMs });
+      const result = await upstreamJson(backend.upstreamConfig, '/api/generate', { method: 'POST', body: warmBody, timeoutMs: context.config.upstreamTimeoutMs });
       await persistEvent(context.store, {
         type: 'prewarm_triggered',
         model: activeModel.model,
@@ -554,7 +570,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
   }
 
   if (request.method === 'POST' && pathname === '/admin/api/test-chat') {
-    const activeModel = await readActiveModel(context.config);
+    let activeModel = await selectModel(context.config);
     if (!activeModel.model) {
       sendJson(response, 503, errorPayload('NO_ACTIVE_MODEL', 'Cannot run a test chat because no active model marker is available.'));
       return;
@@ -566,21 +582,25 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
       sendJson(response, error.statusCode || 400, errorPayload('INVALID_JSON_BODY', error.message));
       return;
     }
+    activeModel = await selectModel(context.config, body.model);
+    if (context.state.maintenanceMode) throw new RequestGateError(503, 'MAINTENANCE_MODE', 'Router maintenance mode is enabled.');
     const prompt = typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt : 'Reply with a one sentence health check.';
     const started = Date.now();
     const backend = resolveBackendAdapter(context.config, activeModel);
     let lease = null;
+    const adminAbort = connectionAbort(request, response);
     try {
       let result;
       if (backend.kind === 'llama_cpp') {
+        lease = await context.requestGate.acquire({ endpoint: '/admin/api/test-chat', clientIdentity: 'admin', limit: backend.maxActiveRequests, backendKey: backend.admissionKey, model: activeModel.model, signal: adminAbort.signal });
+        await backend.ensureAvailable(adminAbort.signal);
         const prepared = await backend.prepareProxy({
           method: 'POST',
           pathname: '/api/chat',
           body: { model: activeModel.model, messages: [{ role: 'user', content: prompt }], stream: false },
-          query: ''
+          query: '', signal: adminAbort.signal
         });
-        lease = context.requestGate.acquire({ endpoint: '/admin/api/test-chat', clientIdentity: 'admin', limit: backend.maxActiveRequests });
-        const upstream = await fetchPrepared(backend, prepared, { 'content-type': 'application/json', accept: 'application/json' });
+        const upstream = await fetchPrepared(backend, prepared, { 'content-type': 'application/json', accept: 'application/json' }, adminAbort.signal);
         const payload = JSON.parse(await upstream.text());
         result = {
           ok: upstream.ok,
@@ -618,6 +638,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
       await persistEvent(context.store, { type: 'admin_test_chat_failed', model: activeModel.model, error: error.message });
       sendJson(response, 502, errorPayload('UPSTREAM_ERROR', error.message));
     } finally {
+      adminAbort.cleanup();
       lease?.release();
     }
     return;
@@ -659,6 +680,10 @@ async function rejectProxyRequest(response, context, record, status, code, messa
     clientIdentity: record.clientIdentity,
     sourceIp: record.sourceIp
   });
+  if (response.headersSent) {
+    endQueuedError(response, record.endpoint === '/v1/chat/completions' ? 'chat' : 'native', { code, message });
+    return;
+  }
   sendJson(response, status, openAiError
     ? {
         error: {
@@ -669,6 +694,18 @@ async function rejectProxyRequest(response, context, record, status, code, messa
         }
       }
     : errorPayload(code, message));
+}
+
+async function ollamaCatalogStatus(context, pathname) {
+  const { entries } = await context.modelDiscovery.document(null, { includeCompatibilityAlias: false });
+  return { models: entries.filter((entry) => pathname !== '/api/ps' || entry.x_ollama_router.health?.available).map((entry) => {
+    const meta = entry.x_ollama_router;
+    return { name: entry.id, model: entry.id, modified_at: meta.updated_at,
+      digest: meta.revision, size: 0, context_length: meta.context_window,
+      ...(pathname === '/api/ps' ? { expires_at: '9999-12-31T23:59:59Z', slots: meta.active_request_limit } : {}),
+      details: { format: 'gguf', family: 'qwen3', parameter_size: '27B', quantization_level: meta.quantization },
+      capabilities: meta.capabilities, x_ollama_router: meta };
+  }) };
 }
 
 async function handleProxy(request, response, url, context) {
@@ -696,13 +733,14 @@ async function handleProxy(request, response, url, context) {
     ? 'metadata'
     : context.config.promptLogging;
 
-  const activeModel = await readActiveModel(context.config);
+  let activeModel;
   let backend;
   try {
+    activeModel = await selectModel(context.config, incomingBody?.model);
     backend = resolveBackendAdapter(context.config, activeModel);
   } catch (error) {
     await rejectProxyRequest(response, context, recordBase, error.statusCode || 503, error.code || 'INVALID_BACKEND_KIND', error.message, {
-      activeModel: activeModel.model,
+      activeModel: activeModel?.model,
       requestedModel: incomingBody?.model || null,
       bodySummary: summarizeBody(incomingBody, bodySummaryMode)
     });
@@ -719,7 +757,7 @@ async function handleProxy(request, response, url, context) {
       drainBlocked ? 'BACKEND_DRAINING' : 'MAINTENANCE_MODE',
       drainBlocked ? 'The active inference backend is draining for a runtime transition. Retry shortly.' : 'Router maintenance mode is enabled.',
       {
-      activeModel: activeModel.model,
+      activeModel: activeModel?.model,
       requestedModel: incomingBody?.model || null,
       bodySummary: summarizeBody(incomingBody, bodySummaryMode),
       toolsPresent: incomingToolPolicy.toolsPresent,
@@ -824,7 +862,7 @@ async function handleProxy(request, response, url, context) {
         toolPolicy = await normalizeToolsForModel(
           bodyWithThinkDefault,
           policy.forwardedModel,
-          context.config.unsupportedToolsPolicy,
+          activeModel.catalog_mode ? 'reject' : context.config.unsupportedToolsPolicy,
           capabilityLookup
         );
       } else {
@@ -981,11 +1019,13 @@ async function handleProxy(request, response, url, context) {
   let parseErrors = 0;
   let requestPersisted = false;
   const clientController = new AbortController();
+  let stopQueueHeartbeat = () => {};
   const abortForClient = () => {
     if (!response.writableEnded && !clientController.signal.aborted) clientController.abort(new Error('Client disconnected.'));
   };
   request.once('aborted', abortForClient);
   response.once('close', abortForClient);
+  if (request.aborted || response.destroyed) abortForClient();
 
   try {
     if (isGenerationPath(pathname)) {
@@ -993,11 +1033,19 @@ async function handleProxy(request, response, url, context) {
         // Acquire before backend-side template/token validation. A switch that
         // begins during validation must wait for this accepted request instead
         // of stopping its backend underneath it.
-        lease = context.requestGate.acquire({
+        lease = await context.requestGate.acquire({
           endpoint: pathname,
           clientIdentity: commonRecord.clientIdentity,
-          limit: backend.maxActiveRequests
+          limit: backend.maxActiveRequests,
+          backendKey: backend.admissionKey,
+          model: activeModel.model,
+          signal: clientController.signal,
+          onQueued: () => {
+            stopQueueHeartbeat = queueHeartbeat(response, commonRecord.streaming
+              ? (pathname === '/v1/chat/completions' ? 'chat' : 'native') : null, { model: activeModel.model });
+          }
         });
+        stopQueueHeartbeat();
       } catch (error) {
         if (error instanceof RequestGateError) {
           await rejectProxyRequest(response, context, commonRecord, error.statusCode, error.code, error.message, commonRecord);
@@ -1009,12 +1057,14 @@ async function handleProxy(request, response, url, context) {
     }
 
     try {
-      prepared = await backend.prepareProxy({
-        method: request.method,
-        pathname,
-        body: sanitizedBody,
-        query: url.search || ''
-      });
+      if (isGenerationPath(pathname)) await backend.ensureAvailable(clientController.signal);
+      const catalogStatus = activeModel.catalog_mode && request.method === 'GET' && ['/api/tags', '/api/ps'].includes(pathname);
+      prepared = catalogStatus
+        ? { localResponse: { status: 200, body: await ollamaCatalogStatus(context, pathname) } }
+        : await backend.prepareProxy({
+          method: request.method, pathname, body: sanitizedBody,
+          query: url.search || '', signal: clientController.signal
+        });
       if (backend.kind === 'llama_cpp' && prepared.reasoning) {
         Object.assign(commonRecord, {
           reasoningEffort: prepared.reasoning.level,
@@ -1091,8 +1141,7 @@ async function handleProxy(request, response, url, context) {
       return;
     }
 
-    const timeoutSignal = AbortSignal.timeout(context.config.upstreamTimeoutMs);
-    const signal = combineAbortSignals([clientController.signal, timeoutSignal]);
+    const signal = clientController.signal;
     const hasBody = methodAllowsBody(prepared.method || request.method) && (prepared.upstreamBody ?? sanitizedBody) !== null;
     upstreamResponse = await fetchPrepared(
       backend,
@@ -1110,16 +1159,23 @@ async function handleProxy(request, response, url, context) {
       let details = null;
       try { details = JSON.parse(text); } catch { details = null; }
       finalStatus = upstreamResponse.status >= 500 ? 502 : upstreamResponse.status;
-      sendJson(response, finalStatus, errorPayload('BACKEND_REQUEST_FAILED', details?.error?.message || details?.error || 'The active llama.cpp backend rejected the request.'));
+      const message = details?.error?.message || details?.error || 'The active llama.cpp backend rejected the request.';
+      if (response.headersSent) endQueuedError(response, pathname === '/v1/chat/completions' ? 'chat' : 'native', { code: 'BACKEND_REQUEST_FAILED', message });
+      else sendJson(response, finalStatus, errorPayload('BACKEND_REQUEST_FAILED', message));
       responseBytes = Buffer.byteLength(text);
       return;
     }
 
     let streamingBody = upstreamResponse.body;
+    if (prepared.journal && !response.headersSent) response.setHeader('x-router-generation-id', prepared.journal.id);
     let contentType = upstreamResponse.headers.get('content-type') || '';
     if (prepared.streaming && backend.kind === 'llama_cpp') {
       if (prepared.responseKind === 'openai-chat') {
-        streamingBody = normalizeOpenAiSseModel(upstreamResponse.body, activeModel.model);
+        streamingBody = normalizeOpenAiSseModel(upstreamResponse.body, activeModel.model, (payload) => {
+          if (payload.usage) usage = payload.usage;
+          if (payload.choices?.[0]?.finish_reason) commonRecord.finishReason = payload.choices[0].finish_reason;
+          if (payload.x_router) Object.assign(commonRecord, { completionState: payload.x_router.status, generationRecordId: payload.x_router.record_id, stopReason: payload.x_router.stop_reason });
+        });
         contentType = 'text/event-stream; charset=utf-8';
       } else {
         streamingBody = openAiSseToOllamaStream(upstreamResponse.body, {
@@ -1132,13 +1188,15 @@ async function handleProxy(request, response, url, context) {
 
     if (prepared.streaming && streamingBody) {
       const collector = prepared.responseKind === 'openai-chat' ? null : new NdjsonUsageCollector();
-      response.setHeader('content-type', contentType);
-      response.setHeader('cache-control', 'no-store');
-      response.setHeader('x-ollama-router', 'local-ai-ollama-router');
-      if (prepared.reasoning?.outputLimitCapped) {
-        response.setHeader('x-router-effective-max-output-tokens', String(prepared.reasoning.outputTokens));
+      if (!response.headersSent) {
+        response.setHeader('content-type', contentType);
+        response.setHeader('cache-control', 'no-store');
+        response.setHeader('x-ollama-router', 'local-ai-ollama-router');
+        if (prepared.reasoning?.outputLimitCapped) {
+          response.setHeader('x-router-effective-max-output-tokens', String(prepared.reasoning.outputTokens));
+        }
+        response.writeHead(finalStatus);
       }
-      response.writeHead(finalStatus);
       const reader = streamingBody.getReader();
       while (true) {
         const { done, value } = await reader.read();
@@ -1146,12 +1204,14 @@ async function handleProxy(request, response, url, context) {
         const buffer = Buffer.from(value);
         responseBytes += buffer.length;
         collector?.observe(buffer);
-        if (!response.write(buffer)) await once(response, 'drain');
+        if (!response.write(buffer)) await once(response, 'drain', { signal: clientController.signal });
       }
       if (collector) {
         const collected = collector.finish();
         usage = collected.usage;
         parseErrors = collected.parseErrors;
+        commonRecord.finishReason = collected.lastObject?.done_reason;
+        if (collected.lastObject?.x_router) Object.assign(commonRecord, { completionState: collected.lastObject.x_router.status, generationRecordId: collected.lastObject.x_router.record_id, stopReason: collected.lastObject.x_router.stop_reason });
       }
       response.end();
     } else {
@@ -1161,6 +1221,8 @@ async function handleProxy(request, response, url, context) {
         const normalized = prepared.responseKind === 'openai-chat'
           ? openAiNonstreamForPublic(payload, activeModel.model)
           : openAiCompletionToOllama(payload, { kind: prepared.responseKind, model: activeModel.model });
+        commonRecord.finishReason = payload.choices?.[0]?.finish_reason;
+        if (payload.x_router) Object.assign(commonRecord, { completionState: payload.x_router.status, generationRecordId: payload.x_router.record_id, stopReason: payload.x_router.stop_reason });
         usage = prepared.responseKind === 'openai-chat'
           ? payload.usage || null
           : extractUsageFromOllamaObject(normalized);
@@ -1190,6 +1252,8 @@ async function handleProxy(request, response, url, context) {
     }
   } catch (error) {
     const clientClosed = clientController.signal.aborted;
+    commonRecord.completionState = clientClosed ? 'cancelled' : 'incomplete';
+    commonRecord.generationRecordId = prepared?.journal?.id;
     const timedOut = error?.name === 'TimeoutError';
     finalStatus = clientClosed ? 499 : (timedOut || error?.name === 'AbortError' ? 504 : 502);
     await persistEvent(context.store, {
@@ -1199,17 +1263,29 @@ async function handleProxy(request, response, url, context) {
       error: error.message
     });
     if (!response.headersSent && !response.destroyed) {
-      sendJson(response, finalStatus, errorPayload(
+      sendJson(response, finalStatus, { ...errorPayload(
         clientClosed ? 'CLIENT_CLOSED_REQUEST' : (finalStatus === 504 ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_REQUEST_FAILED'),
         clientClosed ? 'Client disconnected before completion.' : error.message
-      ));
-    } else if (!clientClosed) {
-      response.destroy(error);
+      ), ...(prepared?.journal ? { x_router: { status: 'incomplete', record_id: prepared.journal.id }, partial_response: prepared.journal.partial } : {}) });
+    } else if (!clientClosed && !response.destroyed) {
+      const info = { code: error.code || 'UPSTREAM_STREAM_FAILED', message: `Response incomplete: ${error.message}` };
+      if (pathname === '/v1/chat/completions') {
+        response.end(`data: ${JSON.stringify({ error: info, x_router: { status: 'incomplete', record_id: prepared?.journal?.id } })}\n\n`);
+      } else {
+        response.end(`${JSON.stringify({ error: info.message, done: true, done_reason: 'error', x_router: { status: 'incomplete', record_id: prepared?.journal?.id } })}\n`);
+      }
     }
   } finally {
+    stopQueueHeartbeat();
     request.off('aborted', abortForClient);
     response.off('close', abortForClient);
     lease?.release();
+    if (prepared?.journal && !prepared.journal.closed) {
+      try {
+        await prepared.journal.append({ type: 'terminal', status: 'incomplete', reason: clientController.signal.aborted ? 'cancelled' : 'delivery_interrupted' });
+      } catch (error) { console.error('generation archive finalization failed', error); }
+      finally { await prepared.journal.close(); }
+    }
     if (!requestPersisted) {
       await persistRequest(context.store, context.metrics, {
         ...commonRecord,
@@ -1415,7 +1491,7 @@ async function handleAdminRequest(request, response, context) {
   } catch (error) {
     console.error('unhandled admin request error', error);
     if (!response.headersSent) {
-      sendJson(response, 500, errorPayload('INTERNAL_ERROR', error.message));
+      sendJson(response, error.statusCode || 500, errorPayload(error.code || 'INTERNAL_ERROR', error.message));
     } else {
       response.destroy(error);
     }
@@ -1475,7 +1551,7 @@ async function handleRequest(request, response, context) {
   } catch (error) {
     console.error('unhandled request error', error);
     if (!response.headersSent) {
-      sendJson(response, 500, errorPayload('INTERNAL_ERROR', error.message));
+      sendJson(response, error.statusCode || 500, errorPayload(error.code || 'INTERNAL_ERROR', error.message));
     } else {
       response.destroy(error);
     }
@@ -1494,7 +1570,7 @@ export async function createRouterServer(config = loadConfig()) {
     store,
     metrics,
     requestGate,
-    modelDiscovery: new ActiveModelDiscovery(config),
+    modelDiscovery: new ModelCatalogDiscovery(config),
     state: {
       startedAt: nowIso(),
       maintenanceMode: false,

@@ -780,7 +780,7 @@ test('reject policy returns an actionable router-generated unsupported-tools err
     assert.equal(response.status, 400);
     const payload = await response.json();
     assert.equal(payload.error.code, 'UNSUPPORTED_TOOLS');
-    assert.match(payload.error.message, /UNSUPPORTED_TOOLS_POLICY=drop/);
+    assert.match(payload.error.message, /model qualified for tools/);
     assert.equal(fixture.upstream.requests.some((item) => item.pathname === '/api/chat'), false);
   } finally {
     await fixture.cleanup();

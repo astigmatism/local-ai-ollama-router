@@ -26,6 +26,7 @@ export class Metrics {
     this.upstreamErrors = 0;
     this.byEndpoint = {};
     this.byModel = {};
+    this.tokensByModel = {};
     this.byClient = {};
     this.byStatus = {};
     this.latencyMsSamples = [];
@@ -46,7 +47,7 @@ export class Metrics {
     if (record.keepAliveNormalized) this.keepAliveNormalizations += 1;
     if (record.upstreamError) this.upstreamErrors += 1;
     increment(this.byEndpoint, `${record.method || 'UNKNOWN'} ${record.endpoint || 'unknown'}`);
-    increment(this.byModel, record.requestedModel || record.activeModel || 'none');
+    increment(this.byModel, record.forwardedModel || record.activeModel || record.requestedModel || 'none');
     increment(this.byClient, record.clientIdentity || record.sourceIp || 'unknown');
     increment(this.byStatus, String(record.responseStatus || record.status || 'unknown'));
     if (Number.isFinite(record.latencyMs)) this.#pushSample(this.latencyMsSamples, record.latencyMs);
@@ -54,8 +55,12 @@ export class Metrics {
 
     const usage = record.usage;
     if (usage && typeof usage === 'object') {
-      if (Number.isFinite(usage.prompt_eval_count)) this.promptTokens += usage.prompt_eval_count;
-      if (Number.isFinite(usage.eval_count)) this.outputTokens += usage.eval_count;
+      const prompt = usage.prompt_eval_count ?? usage.prompt_tokens ?? usage.input_tokens;
+      const output = usage.eval_count ?? usage.completion_tokens ?? usage.output_tokens;
+      const model = record.forwardedModel || record.activeModel || record.requestedModel || 'none';
+      const totals = this.tokensByModel[model] ||= { prompt: 0, output: 0 };
+      if (Number.isFinite(prompt)) { this.promptTokens += prompt; totals.prompt += prompt; }
+      if (Number.isFinite(output)) { this.outputTokens += output; totals.output += output; }
       if (Number.isFinite(usage.total_duration)) this.totalDurationNs += usage.total_duration;
       if (Number.isFinite(usage.eval_duration)) this.evalDurationNs += usage.eval_duration;
       if (Number.isFinite(usage.prompt_eval_duration)) this.promptEvalDurationNs += usage.prompt_eval_duration;
@@ -81,6 +86,7 @@ export class Metrics {
       upstreamErrors: this.upstreamErrors,
       byEndpoint: this.byEndpoint,
       byModel: this.byModel,
+      tokensByModel: this.tokensByModel,
       byClient: this.byClient,
       byStatus: this.byStatus,
       latencyMs: {

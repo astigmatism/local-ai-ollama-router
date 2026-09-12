@@ -1,5 +1,10 @@
 # Local AI Ollama Router
 
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](docs/PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
+The deployed `primary` runtime exposes two resident models with independent one-request admission: coding `qwen3.8-27b-q8_0` (128K) and everyday `qwen3.8-27b-abliterated-q6_k` (32K). `local-active` remains a coding alias. See [the primary integration contract and deployment report](docs/PRIMARY_INTEGRATION.md) for current operations, clients, validation, and recovery. The single-marker deployment examples below describe legacy operation.
+
+
 A Docker-ready, Ollama-compatible router that sits between local AI clients and the real Ollama container. It enforces active-model policy, overwrites protected requests with `keep_alive: -1`, preserves streaming responses, persists request history, extracts Ollama response telemetry, and serves a simple human admin portal on a separate port.
 
 This project is designed for the local AI topology where Open WebUI, ComfyUI, local apps, and a voice assistant should call the router instead of raw Ollama.
@@ -32,7 +37,7 @@ This project is designed for the local AI topology where Open WebUI, ComfyUI, lo
 - Profile-specific `think` negotiation that maps OpenAI reasoning efforts only to string levels declared safe for the active model.
 - Cross-protocol thinking composition with request, active-model, and optional global defaults.
 - Streaming and non-streaming pass-through.
-- Native Node HTTP transport for Ollama requests, including configured timeouts while queued or loading before response headers arrive.
+- Native Node HTTP transport with cancellation and progress-aware generation stall recovery; no total generation deadline.
 - Persistent request log in JSONL.
 - Persistent activity/event log in JSONL.
 - Telemetry extraction from Ollama final response chunks and non-streaming responses.
@@ -167,7 +172,7 @@ The Responses adapter always calls only Ollama `/api/chat` with the active marke
 
 Responses reasoning items round-trip through Ollama assistant `thinking`. Qwen `message.thinking` is returned as raw Responses `reasoning_text` (never a fabricated summary), including the matching streaming reasoning events, and is reattached to the prior assistant message when Codex submits tool results. Ollama's aggregate `prompt_eval_count` and `eval_count` map exactly to Responses input, output, and total usage so Codex can track context and compact long reasoning sessions. Ollama does not expose the split between reasoning and visible output; when thinking is present, the adapter conservatively attributes all aggregate output tokens to `reasoning_tokens` without changing the exact output or total counts. A thinking-only, whitespace-only, or otherwise blank result with no function call fails as `EMPTY_UPSTREAM_RESPONSE` instead of succeeding with an empty assistant message.
 
-All Ollama-bound routes use Node's native HTTP transport. `OLLAMA_UPSTREAM_TIMEOUT_MS` therefore governs Ollama model-load and queue waits through receipt of the response headers; JSON request bodies carry `Content-Length` rather than chunked framing.
+Upstream routes use Node's native HTTP transport with explicit JSON `Content-Length`. `OLLAMA_UPSTREAM_TIMEOUT_MS` bounds legacy Ollama calls and primary metadata/control operations. Primary llama.cpp services have independent, cancellable FIFO queues and no total generation deadline; streaming requests receive keepalives while waiting. See [Primary admission and timeout policy](docs/PRIMARY_INTEGRATION.md).
 
 Codex CLI 0.144.3 can be configured with:
 
@@ -184,7 +189,7 @@ wire_api = "responses"
 requires_openai_auth = false
 ```
 
-The exact stable identifier works whether broad requested-model rewriting is enabled or disabled; day/night marker changes require no Codex configuration change. `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. `/v1/models` publishes only the stable active-slot alias and its dynamic metadata, never a selectable catalog of physical Ollama models.
+The exact stable identifier works whether broad requested-model rewriting is enabled or disabled; day/night marker changes require no Codex configuration change. `web_search` must be disabled because this adapter accepts client-executed function tools only (including Codex namespace groups containing functions). It rejects provider-executed tools instead of silently removing them. `/v1/models` publishes canonical entries and the stable compatibility alias in resident catalog mode, with aliases also in metadata and available through detail lookup. The compatibility row carries its target's actual capabilities and limits; native catalogs and admin resident counts remain canonical-only. Legacy single-marker mode continues to publish its stable alias.
 
 Codex `model_reasoning_effort = "xhigh"` is accepted by the adapter and translated according to the active profile—for example, `think: true` for the nighttime profile and `think: "max"` for the daytime profile above.
 

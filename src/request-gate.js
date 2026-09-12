@@ -19,6 +19,7 @@ export class RequestGate {
     this.drainReason = null;
     this.drainUpdatedAt = null;
     this.active = new Map();
+    this.queues = new Map();
     this.waiters = new Set();
   }
 
@@ -36,6 +37,7 @@ export class RequestGate {
 
   snapshot(activeModel = null) {
     const entries = [...this.active.values()];
+    const queued = [...this.queues.values()].flat();
     return {
       draining: this.draining,
       drain_reason: this.drainReason,
@@ -46,12 +48,24 @@ export class RequestGate {
         counts[entry.endpoint] = (counts[entry.endpoint] || 0) + 1;
         return counts;
       }, {}),
+      active_by_model: entries.reduce((counts, entry) => {
+        counts[entry.model || 'default'] = (counts[entry.model || 'default'] || 0) + 1;
+        return counts;
+      }, {}),
       backend_kind: activeModel?.backend_kind || 'ollama',
       profile: activeModel?.profile || null,
       model: activeModel?.model || null,
       max_active_requests: activeModel?.max_active_requests ?? null,
-      queue_policy: activeModel?.backend_kind === 'llama_cpp' ? 'reject-third-request' : 'backend-managed',
-      queued_count: 0
+      queue_policy: activeModel?.backend_kind === 'llama_cpp' ? 'fifo-per-backend' : 'backend-managed',
+      queued_count: queued.length,
+      queued_by_model: queued.reduce((counts, entry) => {
+        counts[entry.model || 'default'] = (counts[entry.model || 'default'] || 0) + 1;
+        return counts;
+      }, {}),
+      queued_by_endpoint: queued.reduce((counts, entry) => {
+        counts[entry.endpoint || 'unknown'] = (counts[entry.endpoint || 'unknown'] || 0) + 1;
+        return counts;
+      }, {})
     };
   }
 
@@ -63,7 +77,8 @@ export class RequestGate {
     return this.snapshot();
   }
 
-  acquire({ endpoint, clientIdentity, limit = null } = {}) {
+  async acquire({ endpoint, clientIdentity, limit = null, backendKey = 'default', model = null, signal, onQueued } = {}) {
+    signal?.throwIfAborted();
     if (this.draining) {
       throw new RequestGateError(
         503,
@@ -71,17 +86,47 @@ export class RequestGate {
         'The active inference backend is draining for a runtime transition. Retry shortly.'
       );
     }
-    if (Number.isSafeInteger(limit) && limit > 0 && this.active.size >= limit) {
-      throw new RequestGateError(
-        429,
-        'BACKEND_CONCURRENCY_LIMIT',
-        `The active inference backend is already serving its ${limit} concurrent request slots. Retry shortly.`
-      );
-    }
+    const entry = { endpoint, clientIdentity, limit, backendKey, model };
+    if (!this.queues.has(backendKey) && this.hasCapacity(entry)) return this.grant(entry);
+    return await new Promise((resolve, reject) => {
+      const queued = { ...entry, resolve, reject, signal, cleanup: () => signal?.removeEventListener('abort', cancel) };
+      const cancel = () => {
+        const queue = this.queues.get(backendKey);
+        const index = queue?.indexOf(queued) ?? -1;
+        if (index < 0) return;
+        queue.splice(index, 1);
+        if (!queue.length) this.queues.delete(backendKey);
+        queued.cleanup();
+        reject(signal.reason);
+        this.advance(backendKey);
+      };
+      if (!this.queues.has(backendKey)) this.queues.set(backendKey, []);
+      this.queues.get(backendKey).push(queued);
+      signal?.addEventListener('abort', cancel, { once: true });
+      try { onQueued?.(); }
+      catch (error) {
+        const queue = this.queues.get(backendKey);
+        const index = queue?.indexOf(queued) ?? -1;
+        if (index >= 0) queue.splice(index, 1);
+        if (!queue?.length) this.queues.delete(backendKey);
+        queued.cleanup();
+        reject(error);
+        this.advance(backendKey);
+      }
+    });
+  }
 
+  hasCapacity({ backendKey, limit }) {
+    return !(Number.isSafeInteger(limit) && limit > 0)
+      || [...this.active.values()].filter((entry) => entry.backendKey === backendKey).length < limit;
+  }
+
+  grant({ endpoint, clientIdentity, backendKey, model }) {
     const id = randomUUID();
     const entry = {
       id,
+      backendKey,
+      model,
       endpoint: endpoint || 'unknown',
       clientIdentity: clientIdentity || 'unknown',
       startedAt: this.now().toISOString()
@@ -94,17 +139,30 @@ export class RequestGate {
         if (released) return false;
         released = true;
         this.active.delete(id);
-        if (this.active.size === 0) {
-          for (const waiter of this.waiters) waiter();
-          this.waiters.clear();
-        }
+        this.advance(backendKey);
         return true;
       }
     };
   }
 
+  advance(backendKey) {
+    // Drain blocks new arrivals, but already accepted queued work must finish.
+    const queue = this.queues.get(backendKey);
+    while (queue?.length && this.hasCapacity(queue[0])) {
+      const entry = queue.shift();
+      entry.cleanup();
+      if (entry.signal?.aborted) entry.reject(entry.signal.reason);
+      else entry.resolve(this.grant(entry));
+    }
+    if (!queue?.length) this.queues.delete(backendKey);
+    if (this.active.size === 0 && this.queues.size === 0) {
+      for (const waiter of this.waiters) waiter();
+      this.waiters.clear();
+    }
+  }
+
   async waitForIdle(timeoutMs) {
-    if (this.active.size === 0) return true;
+    if (this.active.size === 0 && this.queues.size === 0) return true;
     return await new Promise((resolve) => {
       let finished = false;
       const finish = (value) => {

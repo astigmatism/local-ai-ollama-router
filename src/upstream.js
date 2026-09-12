@@ -39,12 +39,19 @@ function requestWithNodeTransport(url, options = {}) {
     });
 
     request.once('error', reject);
+    if (options.connectTimeoutMs) request.once('socket', (socket) => {
+      if (!socket.connecting) return;
+      const timer = setTimeout(() => request.destroy(new DOMException('Upstream connection timed out.', 'TimeoutError')), options.connectTimeoutMs);
+      const clear = () => clearTimeout(timer);
+      socket.once('connect', clear); socket.once('close', clear); request.once('error', clear);
+    });
     if (options.body !== undefined && options.body !== null) request.write(options.body);
     request.end();
   });
 }
 
 export async function upstreamFetch(config, pathname, options = {}) {
+  if (options.generation) return generationFetch(config, pathname, options);
   const timeoutMs = options.timeoutMs ?? config.upstreamTimeoutMs;
   const controller = options.signal ? null : new AbortController();
   const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
@@ -58,6 +65,59 @@ export async function upstreamFetch(config, pathname, options = {}) {
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+// A generation may spend arbitrarily long in prefill or decode. Only a failed
+// connection, cancellation, or an interval without bytes/backend progress ends it.
+export async function generationFetch(config, pathname, options = {}) {
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const stallMs = config.generationStallTimeoutMs ?? 120000;
+  let lastProgress = Date.now();
+  let lastSlot = null;
+  let checking = false;
+  let waiting = true;
+  const timer = setInterval(async () => {
+    if (checking || signal.aborted) return;
+    checking = true;
+    try {
+      if (options.progressPath) {
+        const result = await upstreamJson(config, options.progressPath, { timeoutMs: 5000, signal });
+        if (result.ok && Array.isArray(result.body)) {
+          const fingerprint = JSON.stringify(result.body.map((slot) => [slot.id_task, slot.n_prompt_tokens_processed,
+            slot.next_token?.map((token) => token.n_decoded)]));
+          if (fingerprint !== lastSlot) { lastSlot = fingerprint; lastProgress = Date.now(); }
+        }
+      }
+      if (waiting && Date.now() - lastProgress >= stallMs) {
+        controller.abort(new DOMException(`No upstream bytes or inference progress for ${stallMs} ms.`, 'TimeoutError'));
+      }
+    } catch (error) {
+      if (waiting && Date.now() - lastProgress >= stallMs) controller.abort(new DOMException(`Upstream stalled: ${error.message}`, 'TimeoutError'));
+    } finally { checking = false; }
+  }, Math.min(5000, Math.max(5, stallMs / 4)));
+  timer.unref?.();
+  const cleanup = () => clearInterval(timer);
+  signal.addEventListener('abort', cleanup, { once: true });
+  try {
+    const response = await requestWithNodeTransport(`${config.upstreamUrl}${pathname}`, { ...options, signal, connectTimeoutMs: config.upstreamConnectTimeoutMs ?? 10000 });
+    lastProgress = Date.now();
+    if (!response.body) { cleanup(); return response; }
+    const reader = response.body.getReader();
+    return new Response(new ReadableStream({
+      async pull(target) {
+        try {
+          waiting = true;
+          lastProgress = Date.now();
+          const { done, value } = await reader.read();
+          waiting = false;
+          if (done) { cleanup(); target.close(); return; }
+          lastProgress = Date.now(); target.enqueue(value);
+        } catch (error) { cleanup(); target.error(signal.reason ?? error); }
+      },
+      async cancel(reason) { cleanup(); controller.abort(reason); await reader.cancel(reason); }
+    }), { status: response.status, headers: response.headers });
+  } catch (error) { cleanup(); throw signal.reason ?? error; }
 }
 
 function upstreamError(code, message) {
@@ -97,7 +157,8 @@ export async function upstreamJson(config, pathname, {
   body = undefined,
   timeoutMs = undefined,
   headers = {},
-  maxResponseBytes = undefined
+  maxResponseBytes = undefined,
+  signal = undefined
 } = {}) {
   const request = {
     method,
@@ -111,11 +172,8 @@ export async function upstreamJson(config, pathname, {
   };
   let response;
   let text;
-  if (maxResponseBytes === undefined) {
-    response = await upstreamFetch(config, pathname, request);
-    text = await response.text();
-  } else {
-    if (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0) {
+  {
+    if (maxResponseBytes !== undefined && (!Number.isSafeInteger(maxResponseBytes) || maxResponseBytes <= 0)) {
       throw new TypeError('maxResponseBytes must be a positive safe integer.');
     }
     const effectiveTimeoutMs = timeoutMs ?? config.upstreamTimeoutMs;
@@ -126,8 +184,8 @@ export async function upstreamJson(config, pathname, {
       controller.abort();
     }, effectiveTimeoutMs);
     try {
-      response = await upstreamFetch(config, pathname, { ...request, signal: controller.signal });
-      text = await readBoundedResponseText(response, maxResponseBytes);
+      response = await upstreamFetch(config, pathname, { ...request, signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal });
+      text = maxResponseBytes === undefined ? await response.text() : await readBoundedResponseText(response, maxResponseBytes);
     } catch (error) {
       if (timedOut) {
         throw upstreamError('UPSTREAM_TIMEOUT', `Upstream JSON request exceeded the ${effectiveTimeoutMs} ms timeout.`);

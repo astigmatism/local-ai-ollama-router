@@ -1,5 +1,8 @@
 FROM node:22-bookworm-slim
 
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+
 WORKDIR /app
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \

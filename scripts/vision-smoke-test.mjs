@@ -25,7 +25,7 @@ const listingResponse = await fetch(`${routerUrl}/v1/models`, {
 });
 const listing = await jsonResponse(listingResponse);
 if (!listingResponse.ok) fail(`Model discovery returned HTTP ${listingResponse.status}.`, listing.body ?? listing.text);
-const model = listing.body?.data?.find((entry) => entry?.id === requestedModel);
+const model = listing.body?.data?.find((entry) => entry?.id === requestedModel || entry?.x_ollama_router?.aliases?.includes(requestedModel));
 if (!model) fail(`Model discovery did not expose ${requestedModel}.`, listing.body);
 const metadata = model.x_ollama_router;
 if (metadata?.schema_version !== 2 || metadata.complete !== true) {

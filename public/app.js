@@ -29,9 +29,9 @@ if (requestFilter) {
 }
 
 document.querySelector('#refresh').addEventListener('click', refresh);
-document.querySelector('#prewarm').addEventListener('click', () => postControl('/admin/api/prewarm', {}));
+document.querySelector('#prewarm').addEventListener('click', () => postControl('/admin/api/prewarm', { model: document.querySelector('#control-model').value }));
 document.querySelector('#reload-config').addEventListener('click', () => postControl('/admin/api/reload-config', {}));
-document.querySelector('#test-chat').addEventListener('click', () => postControl('/admin/api/test-chat', { prompt: 'Reply with a short router health check.' }));
+document.querySelector('#test-chat').addEventListener('click', () => postControl('/admin/api/test-chat', { model: document.querySelector('#control-model').value, prompt: 'Reply with a short router health check.' }));
 document.querySelector('#toggle-maintenance').addEventListener('click', () => {
   const enabled = !(lastSummary && lastSummary.router && lastSummary.router.maintenanceMode);
   postControl('/admin/api/maintenance', { enabled });
@@ -105,7 +105,7 @@ function renderCards(summary) {
   const metrics = summary.metrics || {};
   const config = summary.config || {};
   document.querySelector('#cards').innerHTML = [
-    card('Upstream Ollama', summary.upstream?.ok ? 'healthy' : 'unavailable', upstreamClass),
+    card('Default backend', summary.upstream?.ok ? 'healthy' : 'unavailable', upstreamClass),
     card('Active model', summary.activeModel?.model),
     card('Active loaded', loaded.loaded ? 'loaded' : 'not loaded', loadedClass),
     card('Context', modelContext(summary)),
@@ -182,7 +182,7 @@ function renderRequests(rows) {
       <td>${text(row.ts)}</td>
       <td>${text(row.clientIdentity)}<br><span class="event-time">${text(row.sourceIp)}</span></td>
       <td>${text(row.method)} ${text(row.endpoint)}</td>
-      <td>${text(row.modelRewritten ? `${row.requestedModel} -> ${row.forwardedModel}` : row.requestedModel)}</td>
+      <td>${text(row.modelRewritten ? `${row.requestedModel} -> ${row.forwardedModel}` : row.forwardedModel || row.requestedModel)}</td>
       <td>${thinkCell(row)}</td>
       <td>in: ${text(row.incomingKeepAlive)}<br>out: ${text(row.forwardedKeepAlive)}</td>
       <td class="${statusClass}">${text(row.responseStatus || row.status)}</td>
@@ -229,12 +229,21 @@ async function refresh() {
     ]);
     lastSummary = summary;
     renderCards(summary);
+    const models = summary.models || [];
+    document.querySelector('#model-catalog').innerHTML = '<table><tr><th>Model</th><th>Health</th><th>Context</th><th>Slots</th><th>Capabilities</th><th>Aliases</th></tr>' + models.map((entry) => {
+      const meta = entry.x_ollama_router;
+      return `<tr><td>${text(meta.display_name ?? meta.upstream_model)}</td><td>${text(meta.health?.available ? 'healthy' : 'unavailable')}</td><td>${text(meta.context_window)}</td><td>${text(meta.active_request_limit)}</td><td>${text(meta.capabilities?.join(', '))}</td><td>${text(meta.aliases?.join(', '))}</td></tr>`;
+    }).join('') + '</table>';
+    const picker = document.querySelector('#control-model');
+    const previous = picker.value;
+    picker.innerHTML = models.map((entry) => `<option value="${text(entry.id)}">${text(entry.x_ollama_router?.display_name ?? entry.id)}</option>`).join('');
+    if (models.some((entry) => entry.id === previous)) picker.value = previous;
     renderPolicy(summary);
     renderIssues(summary);
     lastRequests = requests.requests || [];
     renderRequests(filterRequests(lastRequests, requestFilter ? requestFilter.value : 'all'));
     renderEvents(events.events || []);
-    document.querySelector('#ps').textContent = JSON.stringify(summary.ollamaPs, null, 2);
+    document.querySelector('#ps').textContent = JSON.stringify(summary.models || summary.ollamaPs, null, 2);
     document.querySelector('#metrics').textContent = JSON.stringify(summary.metrics, null, 2);
   } catch (error) {
     document.querySelector('#cards').innerHTML = card('Dashboard error', error.message, 'danger');

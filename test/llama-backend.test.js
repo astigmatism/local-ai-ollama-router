@@ -1112,12 +1112,13 @@ test('authenticated draining, two-active limit, backend error, and cancellation 
     const one = post(fixture.apiPort, '/v1/chat/completions', { model: 'x', messages: [{ role: 'user', content: 'HOLD one' }], stream: false });
     const two = post(fixture.apiPort, '/v1/chat/completions', { model: 'y', messages: [{ role: 'user', content: 'HOLD two' }], stream: false });
     await waitForActive(fixture, 2);
-    const third = await post(fixture.apiPort, '/v1/chat/completions', { model: 'z', messages: [{ role: 'user', content: 'third' }], stream: false });
-    assert.equal(third.status, 429);
-    assert.equal((await third.json()).error.code, 'BACKEND_CONCURRENCY_LIMIT');
+    const third = post(fixture.apiPort, '/v1/chat/completions', { model: 'z', messages: [{ role: 'user', content: 'third' }], stream: false });
+    for (let i = 0; i < 100 && !(await runtimeState(fixture)).runtime.queued_count; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal((await runtimeState(fixture)).runtime.queued_count, 1);
     fixture.backend.state.releaseHolds();
     assert.equal((await one).status, 200);
     assert.equal((await two).status, 200);
+    assert.equal((await third).status, 200);
     await waitForActive(fixture, 0);
 
     const backendError = await post(fixture.apiPort, '/v1/chat/completions', { model: 'x', messages: [{ role: 'user', content: 'BACKEND_ERROR' }], stream: false });
@@ -1786,6 +1787,52 @@ test('native reasoning rejects explicit false conflicts and marker-configured st
     assert.equal(fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').length, 0);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test('legacy alias discovery and inference retain bounded cap and reject output policies', async () => {
+  for (const outputLimitPolicy of ['cap', 'reject']) {
+    const fixture = await makeFixture({
+      reasoning: true,
+      maxOutputTokens: 16384,
+      reasoningPolicy: { ...REASONING_POLICY, output_limit_policy: outputLimitPolicy }
+    });
+    fixture.context.config.rewriteRequestedModelToActive = false;
+    try {
+      const base = `http://127.0.0.1:${fixture.apiPort}`;
+      const { data } = await (await fetch(base + '/v1/models')).json();
+      const entry = data.find((model) => model.id === 'local-active');
+      assert.equal(data.length, 1, 'singleton discovery retains its existing shape');
+      assert.deepEqual(await (await fetch(base + '/v1/models/local-active')).json(), entry);
+      const metadata = entry.x_ollama_router;
+      assert.equal(metadata.context_window, 131072);
+      assert.equal(metadata.active_request_limit, 2);
+      assert.equal(metadata.max_output_tokens, 16384);
+      assert.equal(metadata.default_output_tokens, 512);
+      assert.equal(metadata.reasoning.default, 'off');
+      assert.equal(metadata.reasoning.absolute_max_output_tokens, 16384);
+      assert.equal(metadata.reasoning.output_limit_policy, outputLimitPolicy);
+      assert.deepEqual(metadata.capabilities, ['completion', 'thinking']);
+      assert.deepEqual(metadata.input_modalities, ['text']);
+      for (const model of ['local-active', PINNED]) {
+        for (const limit of [undefined, 1024, 6000]) {
+          const response = await post(fixture.apiPort, '/v1/responses', {
+            model, input: 'hello', stream: false, reasoning: { effort: 'none' }, max_output_tokens: limit
+          });
+          if (limit === 6000 && outputLimitPolicy === 'reject') {
+            assert.equal(response.status, 400);
+            assert.equal((await response.json()).error.code, 'OUTPUT_LIMIT_EXCEEDED');
+          } else {
+            assert.equal(response.status, 200, await response.text());
+            const sent = fixture.backend.requests.filter((request) => request.pathname === '/v1/chat/completions').at(-1).body;
+            assert.equal(sent.model, PINNED);
+            assert.equal(sent.max_tokens, limit === undefined ? 512 : Math.min(limit, 4096));
+          }
+        }
+      }
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 

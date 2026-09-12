@@ -1,5 +1,7 @@
 # Test Plan
 
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
 ## Static/local tests
 
 From the repository root:
@@ -242,3 +244,7 @@ For each client, send one request and verify:
 3. Raw Ollama `ollama ps` still shows `Forever`.
 4. No request bypasses router history.
 5. Clients use `11434`, not the admin portal on `11435`.
+
+## Primary resident integration
+
+`test/model-catalog.test.js` checks canonical discovery, aliases, unknown IDs even with legacy rewrite enabled, all four generation APIs, independent gates, global drain, cancellation during template/tokenization, model-specific boundaries/defaults, unavailable health, and legacy-writer protection. Catalog tests run with the legacy tool policy set to `drop` to ensure unsupported resident tools are still rejected. `integrations/dsh/test-model-discovery.mjs` checks retirement/provisioning and idempotent refresh. Live synthetic probes and controlled outage/restart checks are in `scripts/primary/verify-router.py` and `verify-lifecycle.py`; these deliberately use deployed services and the lifecycle script stops model containers after draining.

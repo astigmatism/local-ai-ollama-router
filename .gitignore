@@ -10,3 +10,7 @@ data/*.log
 data/*.json
 runtime/active-model.json
 runtime/*.local.json
+__pycache__/
+*.py[cod]
+# Local operational receipts can contain private requests and deployment state.
+docs/evidence/

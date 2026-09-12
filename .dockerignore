@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+node_modules
+coverage
+.tmp
+data
+docs/evidence
+runtime/active-model.json
+runtime/*.local.json
+**/__pycache__
+**/*.pyc
+**/.DS_Store

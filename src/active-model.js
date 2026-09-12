@@ -65,6 +65,7 @@ function markerMetadata(parsed) {
 
   return {
     context_length: contextLength,
+    output_policy: parsed.output_policy ?? 'legacy',
     max_output_tokens: maxOutputTokens,
     input_modalities: inputModalities,
     metadata_warnings: warnings,
@@ -124,7 +125,7 @@ function emptyMarkerMetadata() {
   };
 }
 
-function parseMarker(raw, filePath) {
+export function parseMarker(raw, filePath) {
   const trimmed = String(raw || '').trim();
   if (!trimmed) return null;
   try {
@@ -256,7 +257,16 @@ export async function readActiveModel(config) {
 
 export async function writeActiveModelMarker(filePath, marker) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
+  // Legacy writers must not silently dismantle a resident catalog.
+  const existing = await fs.readFile(filePath, 'utf8').catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+    return '{}';
+  });
+  if (parseMarker(existing, filePath)?.raw?.models && !marker.models) {
+    throw new Error('Resident model catalog requires a complete catalog update; legacy marker replacement refused.');
+  }
   const payload = {
+    ...(marker.models ? { schema_version: 3, default_model: marker.default_model ?? marker.model, models: marker.models } : {}),
     model: marker.model,
     profile: marker.profile ?? null,
     keep_alive: marker.keep_alive ?? -1,

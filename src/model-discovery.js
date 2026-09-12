@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readActiveModel } from './active-model.js';
+import { readModelCatalog, selectModel } from './model-catalog.js';
 import {
   parseDefaultThink,
   thinkLevelToReasoningEffort,
@@ -178,7 +179,8 @@ function reasoningMetadata(activeModel, capabilities, warnings) {
       perEffort[level] = {
         enabled: entry.enabled,
         default_output_tokens: entry.default_output_tokens,
-        max_output_tokens: entry.max_output_tokens
+        max_output_tokens: entry.max_output_tokens,
+        ...(!activeModel.catalog_mode || entry.reasoning_budget_tokens === undefined ? {} : { reasoning_budget_tokens: entry.reasoning_budget_tokens })
       };
     }
     return {
@@ -188,7 +190,7 @@ function reasoningMetadata(activeModel, capabilities, warnings) {
       default: policy.default_level,
       boolean_true_behavior: { ...policy.boolean_true_behavior },
       output_limit_policy: policy.output_limit_policy,
-      absolute_max_output_tokens: Math.max(...Object.values(policy.levels).map((entry) => entry.max_output_tokens)),
+      absolute_max_output_tokens: policy.schema_version === 2 ? null : Math.max(...Object.values(policy.levels).map((entry) => entry.max_output_tokens)),
       per_effort: perEffort
     };
   }
@@ -288,9 +290,10 @@ export class ActiveModelDiscovery {
   }
 
   async refresh(activeModel, key, generation) {
-    const [ps, show] = await Promise.all([
+    const [ps, show, health] = await Promise.all([
       this.readUpstreamPs(activeModel),
-      this.readUpstreamShow(activeModel)
+      this.readUpstreamShow(activeModel),
+      activeModel.catalog_mode ? resolveBackendAdapter(this.config, activeModel).health() : null
     ]);
     const warnings = [...(activeModel.metadata_warnings || [])];
     if (activeModel.loadedFrom !== 'file') warnings.push('ACTIVE_MODEL_MARKER_UNAVAILABLE');
@@ -316,6 +319,7 @@ export class ActiveModelDiscovery {
         alias: true,
         backend_kind: activeModel.backend_kind || 'ollama',
         upstream_model: activeModel.model,
+        display_name: activeModel.raw?.display_name ?? activeModel.model,
         profile: activeModel.profile || null,
         updated_at: updatedAt,
         context_window: loadedContext ?? activeModel.context_length ?? architecturalContext,
@@ -323,7 +327,13 @@ export class ActiveModelDiscovery {
         context_safety_reserve: enforcedContextSafetyReserve(activeModel),
         active_request_limit: activeModel.max_active_requests ?? null,
         model_context_window: architecturalContext,
+        output_policy: activeModel.output_policy ?? 'legacy',
         max_output_tokens: activeModel.max_output_tokens ?? null,
+        default_output_tokens: activeModel.default_output_tokens ?? null,
+        server_default_output_tokens: activeModel.raw?.server_default_output_tokens ?? null,
+        ...(health ? { health: { available: health.ok, status: health.status },
+          aliases: activeModel.aliases, artifact: activeModel.raw.artifact ?? null,
+          revision: activeModel.revision, quantization: activeModel.raw.quantization ?? null } : {}),
         input_modalities: normalizeModalities(activeModel, capabilities),
         capabilities,
         reasoning: reasoningMetadata(activeModel, capabilities, uniqueWarnings),
@@ -401,5 +411,53 @@ export class ActiveModelDiscovery {
     } catch {
       return { available: false, body: null, warning: activeModel.backend_kind === 'llama_cpp' ? 'BACKEND_METADATA_UNAVAILABLE' : 'OLLAMA_SHOW_UNAVAILABLE' };
     }
+  }
+}
+
+// Cache each resident's metadata independently. Keep canonical entries and the
+// stable public alias discoverable; the alias is a view of its target, not a
+// separate backend, capability profile, or admission slot.
+export class ModelCatalogDiscovery extends ActiveModelDiscovery {
+  constructor(config, options = {}) {
+    super(config, options);
+    this.residents = new Map();
+  }
+
+  invalidate() {
+    super.invalidate();
+    this.residents?.clear();
+  }
+
+  async document(requestedId = null, { includeCompatibilityAlias = true } = {}) {
+    const catalog = await readModelCatalog(this.config);
+    if (!catalog.resident) {
+      if (requestedId !== null && requestedId !== this.config.routerModelAlias) {
+        throw new ModelDiscoveryError(404, 'MODEL_NOT_FOUND', `Model ${JSON.stringify(requestedId)} was not found.`, 'model', 'invalid_request_error');
+      }
+      const result = await super.get(catalog.models[0]);
+      return { entries: [result.entry], etag: result.etag };
+    }
+    const selected = requestedId === null ? catalog.models : catalog.models.filter((m) => m.model === requestedId || m.aliases.includes(requestedId));
+    if (!selected.length) throw new ModelDiscoveryError(404, 'MODEL_NOT_FOUND', `Model ${JSON.stringify(requestedId)} was not found.`, 'model', 'invalid_request_error');
+    const entries = await Promise.all(selected.map(async (model) => {
+      if (!this.residents.has(model.model)) {
+        this.residents.set(model.model, new ActiveModelDiscovery(this.config, {
+          readActiveModel: () => selectModel(this.config, model.model)
+        }));
+      }
+      const { entry } = await this.residents.get(model.model).get(model);
+      const id = requestedId ?? model.model;
+      return { ...entry, id, x_ollama_router: { ...entry.x_ollama_router, alias: id !== model.model } };
+    }));
+    if (requestedId === null && includeCompatibilityAlias) {
+      // readModelCatalog validates that the stable alias belongs to this model.
+      const target = entries.find((entry) => entry.id === catalog.defaultModel);
+      entries.push({
+        ...target,
+        id: this.config.routerModelAlias,
+        x_ollama_router: { ...target.x_ollama_router, alias: true }
+      });
+    }
+    return { entries, etag: entryEtag(entries) };
   }
 }

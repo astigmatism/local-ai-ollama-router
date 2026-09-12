@@ -66,7 +66,8 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
   const activeModel = activeModelInfo?.model || null;
   const requestedModel = getRequestedModel(body);
   const publicAliasRequested = PUBLIC_ALIAS_ROUTES.has(key)
-    && requestedModel === config.routerModelAlias;
+    && (requestedModel === config.routerModelAlias || activeModelInfo?.aliases?.includes(requestedModel));
+  const rewriteToActive = !activeModelInfo?.catalog_mode && config.rewriteRequestedModelToActive;
   const incomingKeepAlive = body && typeof body === 'object' && Object.hasOwn(body, 'keep_alive') ? body.keep_alive : undefined;
 
   if (publicAliasRequested && !activeModel) {
@@ -141,7 +142,7 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
       && typeof body === 'object'
       && !Array.isArray(body)
       && activeModel
-      && (config.rewriteRequestedModelToActive || publicAliasRequested)
+      && (rewriteToActive || publicAliasRequested || (activeModelInfo?.catalog_mode && !requestedModel))
     ) {
       sanitizedBody = cloneJson(body);
       if (requestedModel !== activeModel) {
@@ -201,14 +202,14 @@ export function evaluateProxyPolicy({ method, pathname, body, activeModelInfo, c
   let modelRewritten = false;
   const sanitizedBody = cloneJson(body);
 
-  if (activeModel && (config.rewriteRequestedModelToActive || publicAliasRequested)) {
+  if (activeModel && (rewriteToActive || publicAliasRequested)) {
     if (effectiveModel !== activeModel) {
       sanitizedBody.model = activeModel;
       effectiveModel = activeModel;
       forwardedModel = activeModel;
       modelRewritten = true;
     }
-  } else if (!effectiveModel && config.useActiveModelWhenMissing && activeModel) {
+  } else if (!effectiveModel && (config.useActiveModelWhenMissing || activeModelInfo?.catalog_mode) && activeModel) {
     sanitizedBody.model = activeModel;
     effectiveModel = activeModel;
     forwardedModel = activeModel;

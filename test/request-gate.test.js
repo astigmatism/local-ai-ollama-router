@@ -11,21 +11,21 @@ test('request gate persists drain state and releases leases exactly once', async
   try {
     const gate = new RequestGate(controlFile);
     await gate.init();
-    const first = gate.acquire({ endpoint: '/api/chat', clientIdentity: 'a', limit: 2 });
-    const second = gate.acquire({ endpoint: '/api/chat', clientIdentity: 'b', limit: 2 });
+    const first = await gate.acquire({ endpoint: '/api/chat', clientIdentity: 'a', limit: 2 });
+    const second = await gate.acquire({ endpoint: '/api/chat', clientIdentity: 'b', limit: 2 });
     assert.equal(gate.snapshot().active_count, 2);
-    assert.throws(
-      () => gate.acquire({ endpoint: '/api/chat', clientIdentity: 'c', limit: 2 }),
-      (error) => error instanceof RequestGateError && error.statusCode === 429 && error.code === 'BACKEND_CONCURRENCY_LIMIT'
-    );
+    const pending = gate.acquire({ endpoint: '/api/chat', clientIdentity: 'c', limit: 2 });
+    assert.equal(gate.snapshot().queued_count, 1);
     assert.equal(first.release(), true);
     assert.equal(first.release(), false);
-    assert.equal(gate.snapshot().active_count, 1);
+    const third = await pending;
+    assert.equal(gate.snapshot().active_count, 2);
     second.release();
+    third.release();
     assert.equal(await gate.waitForIdle(50), true);
 
     await gate.setDraining(true, 'unit test');
-    assert.throws(
+    await assert.rejects(
       () => gate.acquire({ endpoint: '/api/chat', clientIdentity: 'd', limit: 2 }),
       (error) => error instanceof RequestGateError && error.statusCode === 503 && error.code === 'BACKEND_DRAINING'
     );
@@ -42,8 +42,42 @@ test('request gate persists drain state and releases leases exactly once', async
 
 test('waitForIdle times out while a generation is still active', async () => {
   const gate = new RequestGate(null);
-  const lease = gate.acquire({ endpoint: '/v1/chat/completions' });
+  const lease = await gate.acquire({ endpoint: '/v1/chat/completions' });
   assert.equal(await gate.waitForIdle(5), false);
   lease.release();
   assert.equal(await gate.waitForIdle(5), true);
+});
+
+test('FIFO queues share a backend, cancel waiting work, and drain accepted work across independent backends', async () => {
+  const gate = new RequestGate(null);
+  const opts = { limit: 1, backendKey: 'day', model: 'day', endpoint: '/api/chat' };
+  const first = await gate.acquire(opts);
+  const cancelled = new AbortController();
+  const skip = gate.acquire({ ...opts, signal: cancelled.signal });
+  const skipped = assert.rejects(skip, { name: 'AbortError' });
+  const order = [];
+  const second = gate.acquire(opts).then((lease) => { order.push(2); return lease; });
+  const third = gate.acquire({ ...opts, endpoint: '/v1/responses' }).then((lease) => { order.push(3); return lease; });
+  const night = await gate.acquire({ ...opts, backendKey: 'night', model: 'night' });
+  assert.deepEqual(gate.snapshot().queued_by_model, { day: 3 });
+  cancelled.abort(); await skipped;
+  assert.equal(gate.snapshot().queued_count, 2);
+  await gate.setDraining(true);
+  await assert.rejects(gate.acquire(opts), { code: 'BACKEND_DRAINING' });
+  const idle = gate.waitForIdle(1000);
+  first.release();
+  const secondLease = await second;
+  assert.deepEqual(order, [2]);
+  assert.equal(await gate.waitForIdle(5), false);
+  secondLease.release();
+  const thirdLease = await third;
+  assert.deepEqual(order, [2, 3]);
+  thirdLease.release();
+  assert.equal(await gate.waitForIdle(5), false);
+  night.release();
+  assert.equal(await idle, true);
+  assert.equal(gate.snapshot().queued_count, 0);
+  await gate.setDraining(false);
+  await assert.rejects(gate.acquire({ ...opts, signal: cancelled.signal }), { name: 'AbortError' });
+  assert.equal(gate.snapshot().active_count, 0);
 });

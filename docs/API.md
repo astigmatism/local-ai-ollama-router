@@ -1,3 +1,7 @@
+> Current production contract: [Primary resident integration](PRIMARY_INTEGRATION.md). Explicit IDs select independently; omitted models select coding. Chat Completions on llama.cpp defaults to SSE unless `stream: false`; Responses defaults to JSON and remains stateless.
+
+The deployed primary catalog uses unrestricted output, unrestricted thinking and template-default effort. Its current policy, context recovery, durable archives and client behavior are defined in [Primary integration](PRIMARY_INTEGRATION.md). Legacy singleton-marker examples below are not primary production defaults.
+
 # API Reference
 
 ## Port split
@@ -16,7 +20,13 @@ http://<host>:11435/admin
 
 The admin portal is intentionally unauthenticated for trusted local/LAN use. Do not expose it to untrusted networks.
 
-## Ollama-compatible API
+## Primary resident APIs
+
+The deployed two-model API, status codes, output/reasoning policies and streaming defaults are specified in [Primary integration](PRIMARY_INTEGRATION.md#endpoint-behavior). All supported generation routes accept an omitted model (coding), a canonical model ID, or the coding alias. Catalog mode ignores legacy broad rewriting; unknown IDs return 404. Discovery and native metadata describe each resident separately.
+
+## Legacy single-marker Ollama API reference
+
+The remaining backend-specific pass-through and rewrite rules below describe the retained legacy mode unless explicitly stated otherwise. They do not override the primary contract above.
 
 These routes are served on the router API listener, normally `http://<host>:11434`.
 
@@ -82,7 +92,7 @@ DELETE /api/delete
 
 To enable them, set `ALLOW_MODEL_MANAGEMENT=true`. Even then, the request must include legacy admin authorization on the router API listener when `ADMIN_TOKEN` is set.
 
-All Ollama upstream calls use Node's native HTTP transport. The configured `OLLAMA_UPSTREAM_TIMEOUT_MS` covers queue and model-load waits through receipt of the upstream response headers. JSON request bodies are sent with an explicit byte `Content-Length`, not chunked transfer framing.
+Upstream calls use Node's native HTTP transport. For legacy Ollama routes, `OLLAMA_UPSTREAM_TIMEOUT_MS` covers the upstream wait through response headers. Primary llama.cpp generation instead uses connection and inactivity checks, without a total generation deadline. Its router-owned FIFO queues have no wait deadline: Daytime and Nighttime queue independently, and disconnecting cancels waiting work. Streaming requests receive keepalives; JSON callers must allow their timeout to cover queue wait plus generation. See [Primary admission policy](PRIMARY_INTEGRATION.md). JSON request bodies use explicit byte `Content-Length`.
 
 ## OpenAI chat completions compatibility
 
@@ -107,7 +117,7 @@ For a `llama_cpp` active profile, `/v1/chat/completions`, `/v1/responses`, and `
 
 `POST /v1/responses` is a stateless compatibility endpoint for Codex CLI. `POST /responses` is an equivalent alias. Both translate to the existing Ollama `/api/chat` operation; neither proxies an arbitrary client-selected path.
 
-The router also implements `GET /v1/models` and `GET /v1/models/{alias}`. They publish exactly one stable active-slot alias with dynamically discovered metadata, including the additive schema-v2 `context_safety_reserve` used by llama.cpp admission; they do not enumerate or permit selection of installed physical models. The full schema and field semantics are documented in [Stable Active-Model Discovery](MODEL_DISCOVERY.md).
+The router implements `GET /v1/models` and `GET /v1/models/{id}`. In primary mode the list has both canonical resident model IDs and a `local-active` compatibility row (or the configured `ROUTER_MODEL_ALIAS`). The alias also resolves through detail lookup and generation requests. Limits, reasoning, health, and capabilities belong to each selected model; the alias inherits its target's metadata without increasing capacity. Native discovery and admin state count canonical residents only. Legacy single-marker mode still exposes its stable alias. The full schema and field semantics are documented in [Stable Active-Model Discovery](MODEL_DISCOVERY.md).
 
 ### Active-model routing rules
 
