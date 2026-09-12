@@ -46,6 +46,13 @@ def main():
         print(json.dumps({'models': [model(mid) for pair in PAIRS for mid in pair] + [model('qwen3.8-27b-abliterated-q6_k')],
             'config': {key: settings[key] for key in ['web.search.ddgs_backend','web.search.concurrent_requests']}}))
         return
+    if mode == 'apply-search':
+        api('/api/v1/configs/import', {'config': {'web.search.ddgs_backend':'duckduckgo,yandex,brave','web.search.concurrent_requests':1}})
+        settings = api('/api/v1/configs/namespace/web.search')
+        assert settings['web.search.ddgs_backend'] == 'duckduckgo,yandex,brave'
+        assert settings['web.search.concurrent_requests'] == 1
+        print('Verified deployed three-provider search fallback configuration')
+        return
     with urllib.request.urlopen(urllib.request.Request('http://ai-router:11434/api/show',
             data=json.dumps({'model':'nighttime'}).encode(), headers={'Content-Type':'application/json'}), timeout=30) as response:
         info = json.load(response)
@@ -62,7 +69,7 @@ def main():
         base['meta']['capabilities']['vision'] = 'vision' in capabilities
         base['meta']['description'] = 'Nighttime; text, tools and reasoning; 32K context, one active request.'
         api('/api/v1/models/model/update', base)
-        api('/api/v1/configs/import', {'config': {'web.search.ddgs_backend':'duckduckgo,brave','web.search.concurrent_requests':1}})
+        api('/api/v1/configs/import', {'config': {'web.search.ddgs_backend':'duckduckgo,yandex,brave','web.search.concurrent_requests':1}})
         api('/api/models?refresh=true')
     elif mode != 'verify':
         raise ValueError(mode)
@@ -73,7 +80,7 @@ def main():
         assert target['base_model_id'] == 'nighttime'
         print('Verified tool parity:', night)
     settings = api('/api/v1/configs/namespace/web.search')
-    assert settings['web.search.ddgs_backend'] == 'duckduckgo,brave'
+    assert settings['web.search.ddgs_backend'] == 'duckduckgo,yandex,brave'
     assert settings['web.search.concurrent_requests'] == 1
     print('Verified search backend and concurrency settings')
 

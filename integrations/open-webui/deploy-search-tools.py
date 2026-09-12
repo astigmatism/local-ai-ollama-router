@@ -41,7 +41,7 @@ def main():
     (backup/'before.json').chmod(0o600)
     updated=re.sub(r'^(\s+image:)\s*\S+\s*$',lambda m:m[1]+' '+image,original,count=1,flags=re.M)
     updated=re.sub(r'^\s*# Rollback value retained from 2026-09-05: DDGS_BACKEND=duckduckgo\n','\n',updated,flags=re.M)
-    variables={'DDGS_BACKEND':'duckduckgo,brave','WEB_SEARCH_CONCURRENT_REQUESTS':'1','DDGS_MIN_REQUEST_INTERVAL':'2.0'}
+    variables={'DDGS_BACKEND':'duckduckgo,yandex,brave','WEB_SEARCH_CONCURRENT_REQUESTS':'1','DDGS_MIN_REQUEST_INTERVAL':'2.0'}
     for key,value in variables.items():
         pattern=r'^(      '+key+r':).*$'
         if re.search(pattern,updated,re.M):
