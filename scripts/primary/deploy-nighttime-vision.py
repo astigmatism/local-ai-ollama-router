@@ -111,6 +111,19 @@ def image_fixture(reverse=False):
     return base64.b64encode(png).decode(), [f'{color} {shape}' for color, shape in shapes]
 
 
+def recognized_shapes(content):
+    content = content.strip().lower()
+    if content.startswith('```'):
+        content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+    value = json.loads(content)
+    if not isinstance(value, list) or len(value) != 3:
+        raise ValueError('Expected three ordered shape descriptions')
+    # Both ["red triangle"] and [{"red": "triangle"}] describe the same image.
+    # Evaluate visual content, not a formatting preference in the test prompt.
+    return [' '.join(next(iter(item.items()))) if isinstance(item, dict) and len(item) == 1
+            else item for item in value]
+
+
 def verify_images(controller, evidence):
     props = controller.http('http://127.0.0.1:18081/props')
     if props['modalities']['vision'] is not True:
@@ -129,9 +142,7 @@ def verify_images(controller, evidence):
         controller.write(evidence / f'image-thinking-{thinking}.json', {'request': body, 'response': result})
         choice = result['choices'][0]
         content = choice['message']['content'].strip()
-        if content.startswith('```'):
-            content = content.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-        if choice['finish_reason'] != 'stop' or json.loads(content.lower()) != expected:
+        if choice['finish_reason'] != 'stop' or recognized_shapes(content) != expected:
             raise RuntimeError('Nighttime image recognition failed; see private qualification output')
         results.append({'thinking': thinking, 'answer': content, 'seconds': round(time.monotonic() - started, 2),
                         'finish_reason': choice['finish_reason']})

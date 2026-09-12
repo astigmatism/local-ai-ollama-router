@@ -58,6 +58,15 @@ class VisionMigrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 v.proposal(manifest, compose)
 
+    def test_image_scoring_accepts_equivalent_json_but_preserves_order_and_content(self):
+        expected = ['red triangle', 'green square', 'blue circle']
+        self.assertEqual(v.recognized_shapes('["red triangle", "green square", "blue circle"]'), expected)
+        self.assertEqual(v.recognized_shapes('[{"red":"triangle"}, {"green":"square"}, {"blue":"circle"}]'), expected)
+        self.assertNotEqual(v.recognized_shapes('["green square", "red triangle", "blue circle"]'), expected)
+        self.assertNotEqual(v.recognized_shapes('["red circle", "green square", "blue triangle"]'), expected)
+        with self.assertRaises(ValueError):
+            v.recognized_shapes('["red triangle"]')
+
 
 if __name__ == '__main__':
     unittest.main()
