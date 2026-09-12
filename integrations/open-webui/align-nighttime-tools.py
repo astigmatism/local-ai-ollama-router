@@ -67,7 +67,8 @@ def main():
         for key in ['builtin_tools','web_search','code_interpreter','terminal','image_generation']:
             base['meta']['capabilities'][key] = True
         base['meta']['capabilities']['vision'] = 'vision' in capabilities
-        base['meta']['description'] = 'Nighttime; text, tools and reasoning; 32K context, one active request.'
+        features = 'text, images, tools and reasoning' if 'vision' in capabilities else 'text, tools and reasoning'
+        base['meta']['description'] = f'Nighttime; {features}; 32K context, one active request.'
         api('/api/v1/models/model/update', base)
         api('/api/v1/configs/import', {'config': {'web.search.ddgs_backend':'duckduckgo,yandex,brave','web.search.concurrent_requests':1}})
         api('/api/models?refresh=true')

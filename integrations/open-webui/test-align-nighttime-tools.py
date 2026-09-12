@@ -21,4 +21,10 @@ class AlignmentTests(unittest.TestCase):
         self.assertTrue(source['meta']['capabilities']['vision'])
     def test_unqualified_backend_cannot_enable_tools(self):
         with self.assertRaises(ValueError):m.align_tools({}, {}, ['completion'])
+    def test_qualified_vision_preserves_full_daytime_capability_parity(self):
+        source={'meta':{'capabilities':{'vision':True,'builtin_tools':True,'web_search':True,'terminal':True}}}
+        target={'meta':{'capabilities':{'vision':False}}}
+        result=m.align_tools(source,target,['completion','thinking','tools','vision'])
+        self.assertEqual(result['meta']['capabilities'],source['meta']['capabilities'])
+        self.assertFalse(target['meta']['capabilities']['vision'])
 if __name__=='__main__':unittest.main()

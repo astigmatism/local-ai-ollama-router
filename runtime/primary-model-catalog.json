@@ -323,7 +323,8 @@
         "value_type": "q8_0"
       },
       "input_modalities": [
-        "text"
+        "text",
+        "image"
       ],
       "prompt_cache_mode": "volatile_slot_lcp_and_host_ram",
       "reasoning_policy": {
@@ -382,10 +383,10 @@
         "enabled": false
       },
       "capability_profile": {
-        "name": "qwen38-27b-abliterated-text-tools-reasoning",
+        "name": "qwen38-27b-abliterated-vision-tools-reasoning",
         "text": true,
         "streaming": true,
-        "vision": false,
+        "vision": true,
         "tools": true,
         "reasoning": true,
         "speculative": false,
@@ -419,7 +420,10 @@
       "output_policy": "unrestricted",
       "global_ram_prompt_cache_mib": 8192,
       "slot_save_path": null,
-      "display_name": "Nighttime (32K)"
+      "display_name": "Nighttime (32K)",
+      "mmproj_path": "/home/astigmatism/ai/models/llm/windowsxp811203/Qwen3.8-27B-Abliterated-GGUF/revisions/efb07baa690a1bc7beb53ee067b4b57c7025b5e7/mmproj-Qwen3.8-27B-Abliterated-F16.gguf",
+      "mmproj_revision": "efb07baa690a1bc7beb53ee067b4b57c7025b5e7",
+      "mmproj_offload": "cpu"
     }
   ],
   "output_policy": "unrestricted",

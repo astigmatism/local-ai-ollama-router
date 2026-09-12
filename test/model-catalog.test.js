@@ -84,7 +84,7 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
   assert.equal(list.data[1].x_ollama_router.display_name, 'Nighttime (32K)');
   assert.equal(list.data[1].x_ollama_router.default_output_tokens, null);
   assert.equal(list.data[1].x_ollama_router.reasoning.per_effort.medium.reasoning_budget_tokens, -1);
-  assert.deepEqual(list.data[1].x_ollama_router.capabilities, ['completion', 'thinking', 'tools']);
+  assert.deepEqual(list.data[1].x_ollama_router.capabilities, ['completion', 'thinking', 'tools', 'vision']);
   const alias = await (await fetch(f.base + '/v1/models/local-active')).json();
   assert.equal(alias.x_ollama_router.upstream_model, CODING);
   assert.equal(alias.x_ollama_router.alias, true);
@@ -116,7 +116,7 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
     assert.deepEqual((await response.json()).models.map((entry) => entry.id), [CODING, EVERYDAY]);
   }
   const show = await (await f.post('/api/show', { model: EVERYDAY })).json();
-  assert.deepEqual(show.capabilities, ['completion', 'thinking', 'tools']);
+  assert.deepEqual(show.capabilities, ['completion', 'thinking', 'tools', 'vision']);
   assert.equal(show.model_info.context_length, 32768);
   f.marker.models[1].context_length = 262144;
   await fs.writeFile(f.file, JSON.stringify(f.marker));
@@ -181,7 +181,7 @@ test('legacy exact-ID discovery preserves truthful unrestricted limits and per-m
   for (const [id, context, capabilities, modalities] of [
     [CODING, 131072, ['completion', 'thinking', 'tools', 'vision'], ['text', 'image']],
     ['local-active', 131072, ['completion', 'thinking', 'tools', 'vision'], ['text', 'image']],
-    [EVERYDAY, 32768, ['completion', 'thinking', 'tools'], ['text']]
+    [EVERYDAY, 32768, ['completion', 'thinking', 'tools', 'vision'], ['text', 'image']]
   ]) {
     const entry = data.find((entry) => entry.id === id);
     const metadata = entry.x_ollama_router;

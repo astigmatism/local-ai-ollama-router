@@ -16,7 +16,7 @@ The primary runtime has two resident services with independent admission. This d
 | Default output / policy maximum | Unrestricted / none | Unrestricted / none |
 | Default thinking | Enabled, unlimited budget, template-default effort | Enabled, unlimited budget, template-default effort |
 | Explicit efforts | off, default, low, medium, xhigh | off, default, low, medium, xhigh |
-| Qualified capabilities | Text, reasoning, tools, images | Text, reasoning and tools |
+| Qualified capabilities | Text, reasoning, tools, images | Text, reasoning, tools, images |
 
 Container/DNS names use Daytime and Nighttime; Stable public service IDs `daytime` and `nighttime` resolve through the catalog; canonical API IDs and `local-active` remain compatible. See [Harness compatibility](HARNESS_PORTAL_COMPATIBILITY.md) for alias discovery and consumer validation.
 
@@ -28,7 +28,7 @@ The pinned engine resolves request `-1` through the server launch default. Both 
 
 ## Context, storage and lifetime
 
-Preflight calls the selected embedded chat template and tokenizer with history, tools and reasoning controls. Coding images additionally undergo zero-generation prefill to count actual projector overhead. Finite requests require **formatted input + explicit output + 1024 ≤ context** and receive accurate overflow arithmetic without clipping. Unrestricted requests require space for input, the safety reserve and at least one generation token; available context is not sent as a reply quota.
+Preflight calls the selected embedded chat template and tokenizer with history, tools and reasoning controls. Images on either service additionally undergo zero-generation prefill to count actual projector overhead. Finite requests require **formatted input + explicit output + 1024 ≤ context** and receive accurate overflow arithmetic without clipping. Unrestricted requests require space for input, the safety reserve and at least one generation token; available context is not sent as a reply quota.
 
 Catalog requests and every received backend event are written to private `DATA_DIR/generations/<UUID>.jsonl` files and synchronized before delivery. This archive retains full original roles, history, reasoning, images, tools, output, transitions and terminal state independently of metadata logging and volatile model caches. Files use mode 0600 in a 0700 directory. Authenticated administrators can retrieve an archive through `/admin/api/generation-record?id=<UUID>`. There is no automatic retention deletion; operators must provision durable disk and deliberately manage retention. Disk failures end the response honestly and stop upstream work. Already committed output remains recoverable. A record without a terminal entry after a process crash is interrupted, never evidence of completion.
 
@@ -51,7 +51,7 @@ Generation has no total-duration timer. A 10-second connection timeout and a def
 
 Unknown models return 404; `daytime`, `local-active` and an omitted model select Daytime; `nighttime` selects Nighttime. Responses remains stateless: send full history; `previous_response_id` and `store:true` are rejected. Generation archives do not implement Responses ID chaining. Native generation's reasoning limitation is explicit; normal chat clients use `/api/chat`.
 
-A busy service queues generation requests in arrival order by resolved backend URL. Aliases and all API routes share that queue; Daytime and Nighttime have independent queues and retain one active generation each. Disconnecting removes queued work. Drain rejects new requests with 503 and lets accepted active and queued requests finish. Runtime state exposes `queued_count`, `queued_by_model`, `queued_by_endpoint`, and `queue_policy: fifo-per-backend`. An unavailable selected service cannot fall through to coding. Everyday tools and images remain rejected. Partial tool arguments are retained but cannot execute as a completed call.
+A busy service queues generation requests in arrival order by resolved backend URL. Aliases and all API routes share that queue; Daytime and Nighttime have independent queues and retain one active generation each. Disconnecting removes queued work. Drain rejects new requests with 503 and lets accepted active and queued requests finish. Runtime state exposes `queued_count`, `queued_by_model`, `queued_by_endpoint`, and `queue_policy: fifo-per-backend`. An unavailable selected service cannot fall through to coding. Both services accept tools and images according to their qualified catalog profiles. Partial tool arguments are retained but cannot execute as a completed call.
 
 Queued streaming requests receive immediate SSE comments or empty, nonterminal Ollama JSON frames, repeated every 15 seconds until admission. These carry no generated content. Native heartbeats are valid JSON because Open WebUI parses every NDJSON line. Validation failures after streaming headers have opened are terminal protocol errors with `x_router.status: incomplete`, not completed replies. JSON requests keep headers pending so final HTTP error codes remain accurate; clients must allow their read/header deadline to cover queue wait plus generation. There is no router queue-wait deadline. Accepted queues are in memory and are not replayed after a crash; routine publication drains them before restart.
 
