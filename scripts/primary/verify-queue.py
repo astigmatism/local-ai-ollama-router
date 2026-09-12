@@ -4,6 +4,7 @@ import concurrent.futures
 import datetime
 import importlib.util
 import json
+import os
 import time
 
 import requests
@@ -12,7 +13,7 @@ spec = importlib.util.spec_from_file_location('installed_primary', '/home/astigm
 primary = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(primary)
 BASE = 'http://192.168.1.21:11434'
-MODEL = 'qwen3.8-27b-abliterated-q6_k'
+MODEL = os.environ.get('QUEUE_TEST_MODEL', 'qwen3.8-27b-abliterated-q6_k')
 
 
 def state():
@@ -31,14 +32,15 @@ def wait_for(predicate, seconds=180):
 
 def main():
     assert state()['queue_policy'] == 'fifo-per-backend'
+    target = primary.http(BASE + '/v1/models/' + MODEL)['x_ollama_router']['upstream_model']
     holder = None
     queued = None
     cancelled = None
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    result = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'model': MODEL}
+    result = {'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'model': MODEL, 'canonical_target': target}
     try:
         holder = requests.post(BASE + '/v1/chat/completions', json={
-            'model': MODEL, 'messages': [{'role': 'user', 'content': 'List every integer from 1 through 2000, one per line. Continue until 2000 without commentary.'}],
+            'model': target, 'messages': [{'role': 'user', 'content': 'List every integer from 1 through 2000, one per line. Continue until 2000 without commentary.'}],
             'reasoning_effort': 'none', 'stream': True,
         }, stream=True, timeout=(10, 180))
         holder.raise_for_status()
@@ -59,8 +61,8 @@ def main():
         lines = queued.iter_lines(chunk_size=1)
         first = json.loads(next(lines))
         assert first['done'] is False and first['message']['content'] == ''
-        before = wait_for(lambda s: s['queued_by_model'].get(MODEL, 0) >= 1)
-        assert before['active_by_model'].get(MODEL) == 1
+        before = wait_for(lambda s: s['queued_by_model'].get(target, 0) >= 1)
+        assert before['active_by_model'].get(target) == 1
 
         cancelled = requests.post(BASE + '/v1/responses', json={
             'model': MODEL, 'input': 'Reply with exactly CANCELLED_REQUEST_MUST_NOT_RUN.', 'stream': True,
@@ -68,10 +70,10 @@ def main():
         cancelled.raise_for_status()
         cancelled_lines = cancelled.iter_lines(chunk_size=1)
         assert next(cancelled_lines).startswith(b': waiting')
-        two = wait_for(lambda s: s['queued_by_model'].get(MODEL, 0) >= 2)
+        two = wait_for(lambda s: s['queued_by_model'].get(target, 0) >= 2)
         cancelled.close()
-        after_cancel = wait_for(lambda s: s['queued_by_model'].get(MODEL, 0) < two['queued_by_model'][MODEL])
-        assert after_cancel['active_by_model'].get(MODEL) == 1
+        after_cancel = wait_for(lambda s: s['queued_by_model'].get(target, 0) < two['queued_by_model'][target])
+        assert after_cancel['active_by_model'].get(target) == 1
         result['queued_cancellation_preserved_active_request'] = True
 
         started = time.monotonic()

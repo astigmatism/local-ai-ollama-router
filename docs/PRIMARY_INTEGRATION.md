@@ -9,7 +9,7 @@ The primary runtime has two resident services with independent admission. This d
 | Display name | Daytime (128K) | Nighttime (32K) |
 | Model | `qwen3.8-27b-q8_0` | `qwen3.8-27b-abliterated-q6_k` |
 | Backend URL | `http://qwen38-daytime:8080` | `http://qwen38-nighttime:8080` |
-| Alias | `local-active`, or omitted model | None |
+| Stable service ID | `daytime` (also `local-active`, or omitted model) | `nighttime` |
 | Working context | 131072 | 32768 |
 | Active generations | 1 | 1 |
 | Context admission reserve | 1024 tokens | 1024 tokens |
@@ -18,7 +18,7 @@ The primary runtime has two resident services with independent admission. This d
 | Explicit efforts | off, default, low, medium, xhigh | off, default, low, medium, xhigh |
 | Qualified capabilities | Text, reasoning, tools, images | Text and reasoning |
 
-Container/DNS names use Daytime and Nighttime; canonical API IDs and the `local-active` alias remain as listed above. See [Harness compatibility](HARNESS_PORTAL_COMPATIBILITY.md) for alias discovery and consumer validation.
+Container/DNS names use Daytime and Nighttime; Stable public service IDs `daytime` and `nighttime` resolve through the catalog; canonical API IDs and `local-active` remain compatible. See [Harness compatibility](HARNESS_PORTAL_COMPATIBILITY.md) for alias discovery and consumer validation.
 
 Every effort has null output default and maximum. No request inherits the former 1024/4096/8192/32768 allowances or the former 2048 thinking budget. Boolean `true` selects template-default effort; boolean `false` disables thinking. Compatibility aliases are intentional: `none` → off, `minimal` → low, `high`/`max` → xhigh. Named enabled efforts keep unrestricted thinking unless a caller explicitly sets a thinking budget.
 
@@ -40,14 +40,16 @@ Generation has no total-duration timer. A 10-second connection timeout and a def
 
 | Endpoint | Primary behavior |
 |---|---|
-| `/v1/models`, `/api/tags`, `/api/ps`, `/api/show` | Both canonical models, correct context/capabilities/health and unrestricted metadata; OpenAI listing also retains the stable compatibility alias |
+| `/v1/models`, `/api/tags` | Canonical models and all declared aliases, with target-equivalent context/capabilities/health and unrestricted metadata |
+| `/api/ps`, admin model lists | Canonical residents only: two engines, one slot each |
+| `/api/show` | Canonical or stable service lookup with the resolved target’s capabilities and context |
 | `/v1/chat/completions` | SSE by default; JSON for `stream:false`; preserves finish reasons |
 | `/v1/responses`, `/responses` | JSON by default, SSE for `stream:true`; incomplete/error status preserved |
 | `/api/chat` | NDJSON by default; JSON for `stream:false`; preserves `done_reason` |
 | `/api/generate` | Supported text completion with explicit thinking off; enabled reasoning remains unsupported on this route |
 | Embeddings / model management | Unavailable for these profiles |
 
-Unknown models return 404; omitted model and `local-active` select coding. Responses remains stateless: send full history; `previous_response_id` and `store:true` are rejected. Generation archives do not implement Responses ID chaining. Native generation's reasoning limitation is explicit; normal chat clients use `/api/chat`.
+Unknown models return 404; `daytime`, `local-active` and an omitted model select Daytime; `nighttime` selects Nighttime. Responses remains stateless: send full history; `previous_response_id` and `store:true` are rejected. Generation archives do not implement Responses ID chaining. Native generation's reasoning limitation is explicit; normal chat clients use `/api/chat`.
 
 A busy service queues generation requests in arrival order by resolved backend URL. Aliases and all API routes share that queue; Daytime and Nighttime have independent queues and retain one active generation each. Disconnecting removes queued work. Drain rejects new requests with 503 and lets accepted active and queued requests finish. Runtime state exposes `queued_count`, `queued_by_model`, `queued_by_endpoint`, and `queue_policy: fifo-per-backend`. An unavailable selected service cannot fall through to coding. Everyday tools and images remain rejected. Partial tool arguments are retained but cannot execute as a completed call.
 
@@ -55,7 +57,7 @@ Queued streaming requests receive immediate SSE comments or empty, nonterminal O
 
 ## Durable sources and deployment
 
-The catalog's `display_name` supplies the shared human-facing labels. Discovery exposes it as `x_ollama_router.display_name`; the router dashboard and DSH discovery use it directly. Open WebUI's `align-primary.py` copies it into persisted canonical model names, preserving custom preset names and all model IDs. Rerun alignment after a future label change. Existing conversations, agents and the `local-active` alias continue to use their stable technical IDs.
+The catalog's `display_name` supplies the shared human-facing labels. Discovery exposes it as `x_ollama_router.display_name`; the router dashboard and DSH discovery use it directly. Open WebUI's explicitly invoked `align-primary.py` copies labels into canonical/service presentation records and migrates preset base IDs toward `daytime` or `nighttime` using discovery metadata. It preserves preset IDs, names, access grants, prompts and saved parameters, including deliberate finite limits. Router deployment does not run this helper or modify Open WebUI. New presets should store stable service IDs on the existing native Ollama connection `http://ai-router:11434`; see [stable services](STABLE_SERVICES.md).
 
 API `http://192.168.1.21:11434`; admin `http://192.168.1.21:11435`; container API `http://ai-router:11434`.
 

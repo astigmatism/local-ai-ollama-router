@@ -40,11 +40,11 @@ The user identifies Harness and Portal on `192.168.1.5`. SSH with the available 
 
 ## Router contract and fix
 
-`GET /v1/models` retains each actual model ID once and appends the configured stable alias, normally `local-active`. The alias row is the primary canonical row with only `id` and `x_ollama_router.alias` changed. The detail endpoint returns the same representation. Canonical `aliases` metadata remains available to alias-aware clients, including clients talking to the pre-fix router. Additional registered aliases remain discoverable through metadata and detail lookup.
+`GET /v1/models` retains each actual model ID once and appends all declared aliases, including `local-active`, `daytime` and `nighttime`. The alias row is the primary canonical row with only `id` and `x_ollama_router.alias` changed. The detail endpoint returns the same representation. Canonical `aliases` metadata remains available to alias-aware clients, including clients talking to the pre-fix router. All registered aliases are discoverable through listing, metadata and detail lookup.
 
 Inference through `/v1/responses`, `/responses`, `/v1/chat/completions`, `/api/chat` and `/api/generate` continues to resolve aliases to the same selected backend as actual IDs. Aliases and their targets share admission and failure behavior. An omitted model selects the configured default; an unknown ID is rejected. An unavailable primary does not redirect `local-active` to the secondary. No alias-specific context, output, reasoning or capability policy is introduced. Native embedding operations retain the selected backend's support restrictions.
 
-Native `/api/tags` and `/api/ps`, and admin overview/runtime state, retain canonical rows only. This preserves dashboard counts and the primary publisher's exact resident-set verification. OpenAI picker clients can hide an alias row only when its canonical `upstream_model` row is present; do not discard the sole row in legacy single-marker mode.
+Native `/api/tags` includes every selectable canonical/alias ID for Ollama clients. `/api/ps` and admin overview/runtime state retain canonical rows only. This preserves dashboard counts and the primary publisher's exact resident-set verification. OpenAI picker clients can hide an alias row only when its canonical `upstream_model` row is present; do not discard the sole row in legacy single-marker mode.
 
 ## Companion change request: dsh-container maintainer
 

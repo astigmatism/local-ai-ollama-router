@@ -135,7 +135,8 @@
     "default": "default"
   },
   "aliases": [
-    "local-active"
+    "local-active",
+    "daytime"
   ],
   "server_default_output_tokens": -1,
   "schema_version": 3,
@@ -278,7 +279,8 @@
         "default": "default"
       },
       "aliases": [
-        "local-active"
+        "local-active",
+        "daytime"
       ],
       "server_default_output_tokens": -1,
       "output_policy": "unrestricted",
@@ -409,7 +411,9 @@
         "max": "xhigh",
         "default": "default"
       },
-      "aliases": [],
+      "aliases": [
+        "nighttime"
+      ],
       "server_default_output_tokens": -1,
       "artifact": "windowsxp811203/Qwen3.8-27B-Abliterated-GGUF Q6_K",
       "output_policy": "unrestricted",

@@ -415,7 +415,7 @@ export class ActiveModelDiscovery {
 }
 
 // Cache each resident's metadata independently. Keep canonical entries and the
-// stable public alias discoverable; the alias is a view of its target, not a
+// stable public aliases discoverable; each alias is a view of its target, not a
 // separate backend, capability profile, or admission slot.
 export class ModelCatalogDiscovery extends ActiveModelDiscovery {
   constructor(config, options = {}) {
@@ -428,7 +428,7 @@ export class ModelCatalogDiscovery extends ActiveModelDiscovery {
     this.residents?.clear();
   }
 
-  async document(requestedId = null, { includeCompatibilityAlias = true } = {}) {
+  async document(requestedId = null, { includeAliases = true } = {}) {
     const catalog = await readModelCatalog(this.config);
     if (!catalog.resident) {
       if (requestedId !== null && requestedId !== this.config.routerModelAlias) {
@@ -449,14 +449,14 @@ export class ModelCatalogDiscovery extends ActiveModelDiscovery {
       const id = requestedId ?? model.model;
       return { ...entry, id, x_ollama_router: { ...entry.x_ollama_router, alias: id !== model.model } };
     }));
-    if (requestedId === null && includeCompatibilityAlias) {
-      // readModelCatalog validates that the stable alias belongs to this model.
-      const target = entries.find((entry) => entry.id === catalog.defaultModel);
-      entries.push({
-        ...target,
-        id: this.config.routerModelAlias,
-        x_ollama_router: { ...target.x_ollama_router, alias: true }
-      });
+    if (requestedId === null && includeAliases) {
+      // The catalog validates uniqueness across canonical IDs and all aliases.
+      // Preserve canonical rows first so consumers can deduplicate by target.
+      for (const target of [...entries]) {
+        for (const id of target.x_ollama_router.aliases) {
+          entries.push({ ...target, id, x_ollama_router: { ...target.x_ollama_router, alias: true } });
+        }
+      }
     }
     return { entries, etag: entryEtag(entries) };
   }

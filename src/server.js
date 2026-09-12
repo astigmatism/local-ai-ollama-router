@@ -266,7 +266,7 @@ async function buildSummary(context) {
     },
     config: publicConfig(context.config),
     activeModel,
-    models: (await context.modelDiscovery.document(null, { includeCompatibilityAlias: false })).entries,
+    models: (await context.modelDiscovery.document(null, { includeAliases: false })).entries,
     upstream,
     ollamaPs: ps,
     activeLoadedState,
@@ -313,7 +313,7 @@ async function handleAdminApi(request, response, pathname, context, { requireAut
       ok: true,
       runtime: context.requestGate.snapshot(activeModel),
       backend: { kind: backend.kind, health, status: ps },
-      models: (await context.modelDiscovery.document(null, { includeCompatibilityAlias: false })).entries,
+      models: (await context.modelDiscovery.document(null, { includeAliases: false })).entries,
       active_model: {
         profile: activeModel.profile,
         model: activeModel.model,
@@ -697,7 +697,8 @@ async function rejectProxyRequest(response, context, record, status, code, messa
 }
 
 async function ollamaCatalogStatus(context, pathname) {
-  const { entries } = await context.modelDiscovery.document(null, { includeCompatibilityAlias: false });
+  // Tags enumerate selectable identifiers; ps enumerates running engines only.
+  const { entries } = await context.modelDiscovery.document(null, { includeAliases: pathname === '/api/tags' });
   return { models: entries.filter((entry) => pathname !== '/api/ps' || entry.x_ollama_router.health?.available).map((entry) => {
     const meta = entry.x_ollama_router;
     return { name: entry.id, model: entry.id, modified_at: meta.updated_at,

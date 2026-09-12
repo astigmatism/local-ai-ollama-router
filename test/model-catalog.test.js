@@ -78,7 +78,7 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
   assert.throws(() => selectCatalogModel(catalog, 'unknown'), { code: 'MODEL_NOT_FOUND' });
   await assert.rejects(writeActiveModelMarker(f.file, { model: CODING }), /complete catalog/);
   const list = await (await fetch(f.base + '/v1/models')).json();
-  assert.deepEqual(list.data.map((x) => x.id), [CODING, EVERYDAY, 'local-active']);
+  assert.deepEqual(list.data.map((x) => x.id), [CODING, EVERYDAY, 'local-active', 'daytime', 'nighttime']);
   assert.equal(list.data[1].x_ollama_router.context_window, 32768);
   assert.equal(list.data[0].x_ollama_router.display_name, 'Daytime (128K)');
   assert.equal(list.data[1].x_ollama_router.display_name, 'Nighttime (32K)');
@@ -94,10 +94,21 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
     x_ollama_router: { ...list.data[0].x_ollama_router, alias: true }
   });
   const tags = await (await fetch(f.base + '/api/tags')).json();
-  assert.deepEqual(tags.models.map((x) => x.name), [CODING, EVERYDAY]);
+  assert.deepEqual(tags.models.map((x) => x.name), [CODING, EVERYDAY, 'local-active', 'daytime', 'nighttime']);
+  for (const [id, target] of [['local-active', CODING], ['daytime', CODING], ['nighttime', EVERYDAY]]) {
+    const canonical = list.data.find((entry) => entry.id === target);
+    const alias = list.data.find((entry) => entry.id === id);
+    assert.deepEqual(alias, { ...canonical, id, x_ollama_router: { ...canonical.x_ollama_router, alias: true } });
+    assert.deepEqual(tags.models.find((entry) => entry.model === id).x_ollama_router, alias.x_ollama_router);
+    const show = await f.post('/api/show', { model: id });
+    assert.equal(show.status, 200);
+    const metadata = await show.json();
+    assert.equal(metadata.model_info.context_length, canonical.x_ollama_router.context_window);
+    assert.deepEqual(metadata.capabilities, canonical.x_ollama_router.capabilities);
+  }
   const ps = await (await fetch(f.base + '/api/ps')).json();
   assert.deepEqual(ps.models.map((entry) => [entry.name, entry.slots]), [[CODING, 1], [EVERYDAY, 1]]);
-  const residents = await f.context.modelDiscovery.document(null, { includeCompatibilityAlias: false });
+  const residents = await f.context.modelDiscovery.document(null, { includeAliases: false });
   assert.deepEqual(residents.entries.map((entry) => entry.id), [CODING, EVERYDAY]);
   for (const route of ['/admin/api/runtime-state', '/admin/api/summary']) {
     const response = await fetch(f.adminBase + route, { headers: { 'x-admin-token': 'test' } });
@@ -110,6 +121,54 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
   f.marker.models[1].context_length = 262144;
   await fs.writeFile(f.file, JSON.stringify(f.marker));
   await assert.rejects(readModelCatalog(f.config), { code: 'INVALID_MODEL_CATALOG' });
+});
+
+test('stable native services preserve reasoning off/max and selected-backend failures', async (t) => {
+  const f = await fixture(t);
+  for (const [model, index] of [['daytime', 0], ['nighttime', 1]]) {
+    for (const think of [false, 'max']) {
+      const response = await f.post('/api/chat', { model, messages: chat(model).messages, think, stream: false });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).done_reason, 'stop');
+      const sent = f.backends[index].state.requests.filter((r) => r.path === '/v1/chat/completions').at(-1).body;
+      assert.equal(sent.model, f.marker.models[index].model);
+      assert.equal(sent.chat_template_kwargs.enable_thinking, think !== false);
+      assert.equal(sent.reasoning_effort, think === 'max' ? 'xhigh' : undefined);
+      assert.equal(sent.n_predict, -1);
+      assert.equal(sent.max_tokens, undefined);
+    }
+  }
+  f.backends[1].state.healthy = false;
+  const primaryCalls = f.backends[0].state.requests.length;
+  for (const model of ['nighttime', EVERYDAY]) {
+    const response = await f.post('/api/chat', { model, messages: chat(model).messages, think: false, stream: false });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'BACKEND_UNAVAILABLE');
+  }
+  assert.equal(f.backends[0].state.requests.length, primaryCalls);
+});
+
+test('service identifiers survive replacing either canonical model without client reconfiguration', async (t) => {
+  const f = await fixture(t);
+  for (const [service, index] of [['daytime', 0], ['nighttime', 1]]) {
+    const clientRequest = { model: service, messages: chat(service).messages, think: false, stream: false };
+    assert.equal((await (await f.post('/api/chat', clientRequest)).json()).model, f.marker.models[index].model);
+    const oldModel = f.marker.models[index].model;
+    const replacement = `replacement-${service}-v2`;
+    f.marker.models[index].model = replacement;
+    f.marker.default_model = f.marker.models[0].model;
+    Object.assign(f.marker, { ...f.marker.models[0], models: f.marker.models });
+    await fs.writeFile(f.file, JSON.stringify(f.marker));
+    const response = await f.post('/api/chat', clientRequest);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).model, replacement);
+    const { models } = await (await fetch(f.base + '/api/tags')).json();
+    assert.equal(models.find((entry) => entry.model === service).x_ollama_router.upstream_model, replacement);
+    assert.equal(models.some((entry) => entry.model === oldModel), false);
+    const alias = await (await fetch(f.base + '/v1/models/' + service)).json();
+    assert.equal(alias.x_ollama_router.upstream_model, replacement);
+  }
+  assert.equal((await (await fetch(f.base + '/v1/models/local-active')).json()).x_ollama_router.upstream_model, 'replacement-daytime-v2');
 });
 
 test('legacy exact-ID discovery preserves truthful unrestricted limits and per-model capabilities', async (t) => {
@@ -169,11 +228,11 @@ test('configured stable alias is discoverable and routes to its target with broa
   Object.assign(f.marker, { ...f.marker.models[0], models: f.marker.models });
   await fs.writeFile(f.file, JSON.stringify(f.marker));
   const { data } = await (await fetch(f.base + '/v1/models')).json();
-  assert.deepEqual(data.map((entry) => entry.id), [CODING, EVERYDAY, 'stable-primary']);
+  assert.deepEqual(data.map((entry) => entry.id), [CODING, EVERYDAY, 'stable-primary', 'extra-primary', 'nighttime']);
   for (const model of [CODING, EVERYDAY, 'stable-primary', 'extra-primary', undefined]) {
     const response = await f.post('/v1/responses', { model, input: '17*19', reasoning: { effort: 'none' }, stream: false });
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).model, model === EVERYDAY ? EVERYDAY : CODING);
+    assert.equal((await response.json()).model, [EVERYDAY, 'nighttime'].includes(model) ? EVERYDAY : CODING);
   }
   assert.equal((await fetch(f.base + '/v1/models/local-active')).status, 404);
   assert.equal((await f.post('/v1/responses', { model: 'local-active', input: 'hi' })).status, 404);
@@ -182,7 +241,7 @@ test('configured stable alias is discoverable and routes to its target with broa
 test('alias and actual-ID inference enforce each discovered model capability profile', async (t) => {
   const f = await fixture(t);
   const { data } = await (await fetch(f.base + '/v1/models')).json();
-  for (const model of ['local-active', CODING, EVERYDAY]) {
+  for (const model of ['local-active', 'daytime', CODING, 'nighttime', EVERYDAY]) {
     const metadata = data.find((entry) => entry.id === model).x_ollama_router;
     for (const [capability, extra] of [
       ['tools', { tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }] }],
@@ -191,7 +250,7 @@ test('alias and actual-ID inference enforce each discovered model capability pro
         { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB' } }
       ] }] }]
     ]) {
-      const backend = f.backends[model === EVERYDAY ? 1 : 0];
+      const backend = f.backends[[EVERYDAY, 'nighttime'].includes(model) ? 1 : 0];
       const before = backend.state.requests.filter((request) => request.path === '/v1/chat/completions').length;
       const response = await f.post('/v1/chat/completions', chat(model, 'hi', extra));
       assert.equal(response.status, metadata.capabilities.includes(capability) ? 200 : 400, await response.text());
@@ -204,7 +263,7 @@ test('alias and actual-ID inference enforce each discovered model capability pro
 
 test('alias and canonical requests preserve omitted unrestricted output and deliberate finite allowances', async (t) => {
   const f = await fixture(t);
-  for (const model of ['local-active', CODING, EVERYDAY]) {
+  for (const model of ['local-active', 'daytime', CODING, 'nighttime', EVERYDAY]) {
     for (const limit of [undefined, 64]) {
       for (const [url, body] of [
         ['/v1/responses', { model, input: 'hi', stream: false, max_output_tokens: limit }],
@@ -214,9 +273,9 @@ test('alias and canonical requests preserve omitted unrestricted output and deli
       ]) {
         const response = await f.post(url, body);
         assert.equal(response.status, 200, await response.text());
-        const backend = f.backends[model === EVERYDAY ? 1 : 0];
+        const backend = f.backends[[EVERYDAY, 'nighttime'].includes(model) ? 1 : 0];
         const sent = backend.state.requests.filter((request) => request.path === '/v1/chat/completions').at(-1).body;
-        assert.equal(sent.model, model === EVERYDAY ? EVERYDAY : CODING);
+        assert.equal(sent.model, [EVERYDAY, 'nighttime'].includes(model) ? EVERYDAY : CODING);
         assert.equal(sent.max_tokens, limit);
         if (limit === undefined) assert.equal(sent.n_predict, -1);
       }
@@ -226,8 +285,8 @@ test('alias and canonical requests preserve omitted unrestricted output and deli
 
 test('all supported generation protocols select coding, everyday, alias and default without rewriting unknown IDs', async (t) => {
   const f = await fixture(t);
-  for (const model of [CODING, EVERYDAY, 'local-active', undefined]) {
-    const expected = model === EVERYDAY ? EVERYDAY : CODING;
+  for (const model of [CODING, EVERYDAY, 'local-active', 'daytime', 'nighttime', undefined]) {
+    const expected = [EVERYDAY, 'nighttime'].includes(model) ? EVERYDAY : CODING;
     for (const [url, body] of [
       ['/v1/chat/completions', chat(model)],
       ['/v1/responses', { model, input: '17*19', reasoning: { effort: 'none' }, max_output_tokens: 16 }],
@@ -253,14 +312,14 @@ test('all supported generation protocols select coding, everyday, alias and defa
 test('independent gates allow overlap, share aliases, drain both, and release only the cancelled backend', async (t) => {
   const f = await fixture(t);
   const c = new AbortController(); const e = new AbortController();
-  const coding = await f.post('/v1/chat/completions', chat('local-active', 'HOLD', { stream: true }), c.signal);
+  const coding = await f.post('/v1/chat/completions', chat('daytime', 'HOLD', { stream: true }), c.signal);
   const everyday = await f.post('/v1/chat/completions', chat(EVERYDAY, 'HOLD', { stream: true }), e.signal);
   await until(() => f.context.requestGate.active.size === 2);
   const waitingCoding = f.post('/api/chat', { model: CODING, messages: chat(CODING).messages, think: false, stream: false });
   await until(() => f.context.requestGate.snapshot().queued_count === 1);
   const waitingAlias = await f.post('/v1/responses', { model: 'local-active', input: '17*19', stream: true });
   const cancelQueued = new AbortController();
-  const waitingNight = await f.post('/v1/chat/completions', chat(EVERYDAY, 'SHOULD_NOT_RUN', { stream: true }), cancelQueued.signal);
+  const waitingNight = await f.post('/v1/chat/completions', chat('nighttime', 'SHOULD_NOT_RUN', { stream: true }), cancelQueued.signal);
   await until(() => f.context.requestGate.snapshot().queued_count === 3);
   cancelQueued.abort(); await waitingNight.body.cancel().catch(() => {});
   await until(() => f.context.requestGate.snapshot().queued_count === 2);
