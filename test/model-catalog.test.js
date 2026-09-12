@@ -84,7 +84,7 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
   assert.equal(list.data[1].x_ollama_router.display_name, 'Nighttime (32K)');
   assert.equal(list.data[1].x_ollama_router.default_output_tokens, null);
   assert.equal(list.data[1].x_ollama_router.reasoning.per_effort.medium.reasoning_budget_tokens, -1);
-  assert.deepEqual(list.data[1].x_ollama_router.capabilities, ['completion', 'thinking']);
+  assert.deepEqual(list.data[1].x_ollama_router.capabilities, ['completion', 'thinking', 'tools']);
   const alias = await (await fetch(f.base + '/v1/models/local-active')).json();
   assert.equal(alias.x_ollama_router.upstream_model, CODING);
   assert.equal(alias.x_ollama_router.alias, true);
@@ -116,7 +116,7 @@ test('catalog lists canonical identities, resolves aliases deliberately, and pro
     assert.deepEqual((await response.json()).models.map((entry) => entry.id), [CODING, EVERYDAY]);
   }
   const show = await (await f.post('/api/show', { model: EVERYDAY })).json();
-  assert.deepEqual(show.capabilities, ['completion', 'thinking']);
+  assert.deepEqual(show.capabilities, ['completion', 'thinking', 'tools']);
   assert.equal(show.model_info.context_length, 32768);
   f.marker.models[1].context_length = 262144;
   await fs.writeFile(f.file, JSON.stringify(f.marker));
@@ -181,7 +181,7 @@ test('legacy exact-ID discovery preserves truthful unrestricted limits and per-m
   for (const [id, context, capabilities, modalities] of [
     [CODING, 131072, ['completion', 'thinking', 'tools', 'vision'], ['text', 'image']],
     ['local-active', 131072, ['completion', 'thinking', 'tools', 'vision'], ['text', 'image']],
-    [EVERYDAY, 32768, ['completion', 'thinking'], ['text']]
+    [EVERYDAY, 32768, ['completion', 'thinking', 'tools'], ['text']]
   ]) {
     const entry = data.find((entry) => entry.id === id);
     const metadata = entry.x_ollama_router;
@@ -361,7 +361,8 @@ test('selected template admission, independent reasoning budgets, longer output 
   assert.equal((await f.post('/v1/responses', { model: EVERYDAY, input: 'hi', previous_response_id: 'old' })).status, 400);
   assert.equal((await f.post('/v1/responses', { model: EVERYDAY, input: 'hi', store: true })).status, 400);
   const tools = await f.post('/v1/chat/completions', chat(EVERYDAY, 'hi', { tools: [{ type: 'function', function: { name: 'f', parameters: { type: 'object' } } }] }));
-  assert.equal(tools.status, 400);
+  assert.equal(tools.status, 200);
+  assert.equal(f.backends[1].state.requests.filter((r) => r.path === '/v1/chat/completions').at(-1).body.tools[0].function.name, 'f');
   f.backends[1].state.healthy = false;
   const unavailable = await f.post('/v1/chat/completions', chat(EVERYDAY));
   assert.equal(unavailable.status, 503); assert.equal((await unavailable.json()).error.code, 'BACKEND_UNAVAILABLE');

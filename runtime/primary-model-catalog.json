@@ -382,11 +382,11 @@
         "enabled": false
       },
       "capability_profile": {
-        "name": "qwen38-27b-abliterated-text-reasoning",
+        "name": "qwen38-27b-abliterated-text-tools-reasoning",
         "text": true,
         "streaming": true,
         "vision": false,
-        "tools": false,
+        "tools": true,
         "reasoning": true,
         "speculative": false,
         "prompt_cache_volatile": true,

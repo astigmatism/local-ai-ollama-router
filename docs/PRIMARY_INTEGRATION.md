@@ -16,7 +16,7 @@ The primary runtime has two resident services with independent admission. This d
 | Default output / policy maximum | Unrestricted / none | Unrestricted / none |
 | Default thinking | Enabled, unlimited budget, template-default effort | Enabled, unlimited budget, template-default effort |
 | Explicit efforts | off, default, low, medium, xhigh | off, default, low, medium, xhigh |
-| Qualified capabilities | Text, reasoning, tools, images | Text and reasoning |
+| Qualified capabilities | Text, reasoning, tools, images | Text, reasoning and tools |
 
 Container/DNS names use Daytime and Nighttime; Stable public service IDs `daytime` and `nighttime` resolve through the catalog; canonical API IDs and `local-active` remain compatible. See [Harness compatibility](HARNESS_PORTAL_COMPATIBILITY.md) for alias discovery and consumer validation.
 

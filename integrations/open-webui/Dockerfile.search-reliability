@@ -1,0 +1,5 @@
+FROM local/open-webui:0.11.3-router-unrestricted-v1
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.revision=$VCS_REF
+COPY search_duckduckgo.py /app/backend/open_webui/retrieval/web/duckduckgo.py
+RUN python -m py_compile /app/backend/open_webui/retrieval/web/duckduckgo.py
